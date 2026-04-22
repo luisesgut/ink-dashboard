@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
+import { Separator } from "@/components/ui/separator"
 
 export function AppHeader() {
   const [dateStr, setDateStr] = useState("")
@@ -18,16 +19,12 @@ export function AppHeader() {
   }, [])
 
   return (
-    <header className="sticky top-0 z-30 flex h-14 items-center gap-4 border-b bg-card px-4 lg:px-6">
-      <SidebarTrigger />
-      <div className="flex flex-1 items-center justify-between">
-        <h1 className="text-sm font-semibold text-foreground lg:text-base">
-          InkBFX - Control de Tintas
-        </h1>
-        <div className="flex items-center gap-2 text-xs text-muted-foreground font-mono">
-          <span className="hidden sm:inline">{dateStr}</span>
-        </div>
-      </div>
+    <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b bg-background/80 backdrop-blur-sm px-4">
+      <SidebarTrigger className="h-7 w-7 text-muted-foreground hover:text-foreground" />
+      <Separator orientation="vertical" className="h-4" />
+      <span className="flex-1 text-xs text-muted-foreground font-mono capitalize hidden sm:block">
+        {dateStr}
+      </span>
     </header>
   )
 }

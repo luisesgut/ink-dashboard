@@ -6,7 +6,48 @@ import { Card, CardContent } from "@/components/ui/card"
 import { useTableroHub } from "@/lib/tablero-hub"
 import { mergeCatalogoConHub, tintasToImpresoras } from "@/lib/tablero-mappers"
 import { getMaquinasCatalogo, type CatalogoMaquina } from "@/lib/pocketbase"
-import { LoaderCircle, Printer } from "lucide-react"
+import { LoaderCircle, Printer, Wifi, WifiOff, Activity } from "lucide-react"
+import { cn } from "@/lib/utils"
+
+function StatPill({
+  count,
+  label,
+  dotClass,
+}: {
+  count: number
+  label: string
+  dotClass: string
+}) {
+  return (
+    <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2">
+      <span className={cn("h-2 w-2 rounded-full flex-shrink-0", dotClass)} />
+      <span className="text-lg font-bold text-foreground tabular-nums">{count}</span>
+      <span className="text-xs text-muted-foreground">{label}</span>
+    </div>
+  )
+}
+
+function ConnectionDot({ state }: { state: string }) {
+  const isConnected = state === "Connected"
+  const isConnecting = state === "Connecting" || state === "Reconnecting"
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] font-medium border",
+        isConnected && "bg-emerald-500/10 text-emerald-600 border-emerald-200 dark:text-emerald-400 dark:border-emerald-800",
+        isConnecting && "bg-amber-500/10 text-amber-600 border-amber-200 dark:text-amber-400 dark:border-amber-800",
+        !isConnected && !isConnecting && "bg-red-500/10 text-red-600 border-red-200 dark:text-red-400 dark:border-red-800",
+      )}
+    >
+      {isConnected ? (
+        <Wifi className="h-3 w-3" />
+      ) : (
+        <WifiOff className="h-3 w-3" />
+      )}
+      {isConnecting ? "Conectando…" : isConnected ? "En vivo" : state}
+    </span>
+  )
+}
 
 export default function DashboardPage() {
   const { datos: datosTablero, connectionState, hasSynced, error } = useTableroHub()
@@ -25,6 +66,13 @@ export default function DashboardPage() {
   const cargandoHub = !hasSynced && connectionState !== "Disconnected"
 
   const [printCardsConDatos, setPrintCardsConDatos] = useState<Set<string>>(new Set())
+
+  // Stats
+  const stats = useMemo(() => ({
+    activas: impresoras.filter(m => m.estado === "activa").length,
+    paradas: impresoras.filter(m => m.estado === "parada").length,
+    cambio: impresoras.filter(m => m.estado === "cambio").length,
+  }), [impresoras])
 
   useEffect(() => {
     let cancelled = false
@@ -71,63 +119,87 @@ export default function DashboardPage() {
 
   return (
     <div className="flex flex-col gap-6">
-      <div>
-        <h2 className="text-2xl font-bold tracking-tight text-foreground text-balance">
-          Panel de Control
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          Estado en tiempo real de las impresoras y solicitudes de tinta
-        </p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Fuente: tableroImpresionHub ({connectionState})
-          {error ? ` - ${error}` : ""}
-        </p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Catalogo de maquinas: {catalogoMaquinas.length > 0 ? `${catalogoMaquinas.length} registradas` : "no disponible"}
-          {catalogoError ? ` - ${catalogoError}` : ""}
-        </p>
+      {/* Page header */}
+      <div className="flex flex-col gap-1 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex items-center gap-2">
+            <Activity className="h-5 w-5 text-primary" />
+            <h2 className="text-xl font-bold tracking-tight text-foreground">
+              Panel de Control
+            </h2>
+          </div>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            Estado en tiempo real de las impresoras
+          </p>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <ConnectionDot state={connectionState} />
+          {catalogoError && (
+            <span className="text-[11px] text-amber-600 dark:text-amber-400">
+              ⚠ Catálogo no disponible
+            </span>
+          )}
+          {error && (
+            <span className="text-[11px] text-red-600 dark:text-red-400 truncate max-w-xs">
+              ⚠ {error}
+            </span>
+          )}
+        </div>
       </div>
 
-      {/* Printer Grid */}
-      <div>
-        <h3 className="mb-4 text-lg font-semibold text-foreground">
-          Impresoras
-        </h3>
-        {cargandoHub ? (
-          <Card>
-            <CardContent className="flex min-h-40 flex-col items-center justify-center gap-3 text-muted-foreground">
-              <LoaderCircle className="h-10 w-10 animate-spin" />
-              <p className="text-sm">Conectando al hub de órdenes...</p>
-            </CardContent>
-          </Card>
-        ) : impresoras.length === 0 ? (
-          <Card>
-            <CardContent className="flex min-h-40 flex-col items-center justify-center gap-2 text-muted-foreground">
-              <Printer className="h-10 w-10 opacity-40" />
-              <p className="text-sm font-medium">Sin datos del hub</p>
-              <p className="text-xs">No se recibieron máquinas desde `172.16.10.31`.</p>
-            </CardContent>
-          </Card>
-        ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {impresoras.map((impresora) => {
-              const row = datosTablero.find(d =>
-                d.prensa.replace(/\D/g, "").padStart(2, "0") === impresora.id.replace(/\D/g, "").padStart(2, "0")
-              )
-              const pc = row?.printCard ?? ""
-              const tieneDatos = printCardsConDatos.has(pc)
-              return (
-                <PrinterCard
-                  key={impresora.id}
-                  impresora={impresora}
-                  printCard={pc}
-                  tieneDatos={tieneDatos}
-                />
-              )
-            })}
+      {/* Stats row */}
+      {!cargandoHub && impresoras.length > 0 && (
+        <div className="flex flex-wrap gap-2">
+          <StatPill count={stats.activas} label="Activas" dotClass="bg-emerald-500" />
+          <StatPill count={stats.paradas} label="Paradas" dotClass="bg-red-500" />
+          <StatPill count={stats.cambio} label="En cambio" dotClass="bg-amber-500" />
+          <div className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 ml-auto">
+            <Printer className="h-4 w-4 text-muted-foreground" />
+            <span className="text-lg font-bold text-foreground tabular-nums">{impresoras.length}</span>
+            <span className="text-xs text-muted-foreground">total</span>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Grid */}
+      {cargandoHub ? (
+        <Card>
+          <CardContent className="flex min-h-48 flex-col items-center justify-center gap-3 text-muted-foreground">
+            <LoaderCircle className="h-10 w-10 animate-spin text-primary/60" />
+            <div className="text-center">
+              <p className="text-sm font-medium">Conectando al hub de órdenes…</p>
+              <p className="text-xs text-muted-foreground/70 mt-0.5">tableroImpresionHub</p>
+            </div>
+          </CardContent>
+        </Card>
+      ) : impresoras.length === 0 ? (
+        <Card>
+          <CardContent className="flex min-h-48 flex-col items-center justify-center gap-2 text-muted-foreground">
+            <Printer className="h-10 w-10 opacity-30" />
+            <p className="text-sm font-medium">Sin datos del hub</p>
+            <p className="text-xs opacity-70">No se recibieron máquinas desde el servidor.</p>
+          </CardContent>
+        </Card>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {impresoras.map((impresora) => {
+            const row = datosTablero.find(d =>
+              d.prensa.replace(/\D/g, "").padStart(2, "0") === impresora.id.replace(/\D/g, "").padStart(2, "0")
+            )
+            const pc = row?.printCard ?? ""
+            const tieneDatos = printCardsConDatos.has(pc)
+            return (
+              <PrinterCard
+                key={impresora.id}
+                impresora={impresora}
+                printCard={pc}
+                tieneDatos={tieneDatos}
+              />
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

@@ -7,8 +7,10 @@ import { useInkStore } from "@/lib/store"
 import { useTableroHub } from "@/lib/tablero-hub"
 import { machineIdToPrensa, normalizePrensaCode, parseCantidadPorUnidad } from "@/lib/tablero-mappers"
 import { calcularTiempoMinutos, determinarUrgencia } from "@/lib/mock-data"
-import { getPrintCard, getTinta, calcularKgPorColor, calcularTiempoPorTinta, type KgPorColor } from "@/lib/pocketbase"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import {
+  getPrintCard, getTinta, calcularKgPorColor, calcularTiempoPorTinta, type KgPorColor,
+  getInkReturns, createInkReturn, updateInkReturn, deleteInkReturn, type InkReturn,
+} from "@/lib/pocketbase"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -26,9 +28,10 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/u
 import { StatusBadge } from "@/components/status-badge"
 import { FlashingAlert } from "@/components/flashing-alert"
 import { UrgencyBadge } from "@/components/urgency-badge"
+import { cn } from "@/lib/utils"
 import {
   ArrowLeft, Droplets, Gauge, LoaderCircle, Ruler, Printer, Send, ExternalLink, FileText,
-  ZoomIn, ZoomOut, Maximize2, RotateCcw
+  ZoomIn, ZoomOut, Maximize2, RotateCcw, Activity, AlertCircle, Undo2
 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -38,10 +41,9 @@ const KG_BASE_MAQUINA: Record<string, number> = {
   "I07-VISION 1": 10, "I08-SCHIAVI": 20,
 }
 
-// Estado editable por fila de color
 interface FilaColor extends KgPorColor {
-  kgEnMaquina: string   // lo ingresa el operador
-  viscosidad: string    // lo ingresa el operador
+  kgEnMaquina: string
+  viscosidad: string
   enviando: boolean
 }
 
@@ -50,6 +52,151 @@ interface ValidationWarning {
   campos: string[]
 }
 
+// ── Stat card ─────────────────────────────────────────────────────────────────
+function StatCard({
+  icon: Icon,
+  label,
+  value,
+  sub,
+  children,
+}: {
+  icon: React.ElementType
+  label: string
+  value?: string
+  sub?: string
+  children?: React.ReactNode
+}) {
+  return (
+    <div className="rounded-xl border bg-card p-4 flex flex-col gap-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-muted-foreground uppercase tracking-wide">{label}</span>
+        <Icon className="h-4 w-4 text-muted-foreground/50" />
+      </div>
+      {children ?? (
+        <>
+          <p className="text-2xl font-bold font-mono text-foreground leading-none">{value}</p>
+          {sub && <p className="text-xs text-muted-foreground">{sub}</p>}
+        </>
+      )}
+    </div>
+  )
+}
+
+// ── Document preview card ──────────────────────────────────────────────────────
+function DocCard({
+  label,
+  printCard,
+  src,
+  fullSrc,
+  onExpand,
+}: {
+  label: string
+  printCard: string
+  src: string
+  fullSrc: string
+  onExpand: () => void
+}) {
+  return (
+    <div className="rounded-xl border bg-card overflow-hidden flex flex-col">
+      <div className="flex items-center justify-between px-4 py-2.5 border-b">
+        <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+          <FileText className="h-3.5 w-3.5" />
+          {label}
+        </span>
+        {printCard && (
+          <div className="flex items-center gap-0.5">
+            <Button variant="ghost" size="icon" className="h-6 w-6" title="Pantalla completa" onClick={onExpand}>
+              <Maximize2 className="h-3 w-3" />
+            </Button>
+            <a href={fullSrc} target="_blank" rel="noopener noreferrer">
+              <Button variant="ghost" size="icon" className="h-6 w-6" title="Nueva pestaña">
+                <ExternalLink className="h-3 w-3" />
+              </Button>
+            </a>
+          </div>
+        )}
+      </div>
+      {printCard ? (
+        <button className="flex-1 cursor-zoom-in focus:outline-none" onClick={onExpand} title="Click para ampliar">
+          <iframe src={src} className="w-full h-32 border-0 pointer-events-none" title={label} />
+        </button>
+      ) : (
+        <div className="flex-1 flex items-center justify-center h-32 text-xs text-muted-foreground">
+          Sin documento asignado
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Zoom modal ─────────────────────────────────────────────────────────────────
+function ZoomModal({
+  open,
+  onClose,
+  title,
+  src,
+  fullSrc,
+  zoom,
+  onZoom,
+}: {
+  open: boolean
+  onClose: () => void
+  title: string
+  src: string
+  fullSrc: string
+  zoom: number
+  onZoom: (z: number) => void
+}) {
+  return (
+    <Dialog open={open} onOpenChange={v => { if (!v) onClose() }}>
+      <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
+        <DialogHeader className="flex flex-row items-center justify-between px-4 py-2.5 border-b shrink-0">
+          <DialogTitle className="text-xs font-mono text-muted-foreground">{title}</DialogTitle>
+          <div className="flex items-center gap-1 mr-8">
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onZoom(Math.max(0.5, +(zoom - 0.25).toFixed(2)))}>
+              <ZoomOut className="h-3.5 w-3.5" />
+            </Button>
+            <span className="text-xs font-mono w-10 text-center tabular-nums">{Math.round(zoom * 100)}%</span>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onZoom(Math.min(4, +(zoom + 0.25).toFixed(2)))}>
+              <ZoomIn className="h-3.5 w-3.5" />
+            </Button>
+            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => onZoom(1)}>
+              <RotateCcw className="h-3.5 w-3.5" />
+            </Button>
+            <a href={fullSrc} target="_blank" rel="noopener noreferrer">
+              <Button variant="ghost" size="icon" className="h-7 w-7">
+                <ExternalLink className="h-3.5 w-3.5" />
+              </Button>
+            </a>
+          </div>
+        </DialogHeader>
+        <div
+          className="flex-1 overflow-auto"
+          onWheel={e => {
+            e.preventDefault()
+            onZoom(Math.min(4, Math.max(0.5, +(zoom + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))))
+          }}
+        >
+          <iframe
+            src={src}
+            title={title}
+            style={{
+              width: `${100 / zoom}%`,
+              height: `${100 / zoom}%`,
+              minHeight: "100%",
+              border: "none",
+              transform: `scale(${zoom})`,
+              transformOrigin: "top left",
+              display: "block",
+            }}
+          />
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 export default function MaquinaPage() {
   const params = useParams()
   const id = params.id as string
@@ -69,10 +216,7 @@ export default function MaquinaPage() {
   const nombreMaquina = tableroActual ? `Prensa ${tableroActual.prensa}` : `Prensa ${prensa ?? id}`
   const estado = progreso >= 100 ? "cambio" : "activa"
 
-  // Velocidad — el operador la ingresa una sola vez
   const [velocidad, setVelocidad] = useState("")
-
-  // Colores cargados del Print Card
   const [filas, setFilas] = useState<FilaColor[]>([])
   const [loadingPC, setLoadingPC] = useState(false)
   const [anchoCm, setAnchoCm] = useState(0)
@@ -84,25 +228,25 @@ export default function MaquinaPage() {
   const [fichaModalOpen, setFichaModalOpen] = useState(false)
   const [fichaZoom, setFichaZoom] = useState(1)
   const [validationWarning, setValidationWarning] = useState<ValidationWarning | null>(null)
+  const [inkReturns, setInkReturns] = useState<Map<string, InkReturn>>(new Map())
+  const [returnModal, setReturnModal] = useState<{
+    rowIndex: number; pantone: string; existingId: string | null; existingKg: number
+  } | null>(null)
+  const [returnKgInput, setReturnKgInput] = useState("")
+  const [returningInk, setReturningInk] = useState(false)
 
   const solicitudesMaquina = getSolicitudesPorMaquina(normalizedId).filter(s => s.estado !== "entregado")
   const notificacionesMaquina = getNotificacionesPorMaquina(normalizedId).filter(n => !n.leida)
 
-  const cargarColores = useCallback(async (pc: string, metros: number) => {
+  const cargarColores = useCallback(async (pc: string, metros: number, machineId: string) => {
     if (!pc) return
     const requestId = ++loadRequestRef.current
     setLoadingPC(true)
 
-    console.log("API_URL:", process.env.NEXT_PUBLIC_API_URL)
-    console.log("Fetching PrintCard:", pc)
-
-    // Jalar colores del endpoint .NET (fuente de verdad)
     let coloresAPI: { pantone: string, cobertura: number, orden: number }[] = []
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/PrintCardTintas/${encodeURIComponent(pc)}`)
-      console.log("API response status:", res.status)
       if (res.ok) coloresAPI = await res.json()
-      console.log("Colores API:", coloresAPI)
     } catch (e) {
       console.error("Error fetching colores API:", e)
     }
@@ -113,9 +257,14 @@ export default function MaquinaPage() {
       return
     }
 
-    // Ancho y máquina siguen viniendo de PocketBase
-    const pcData = await getPrintCard(pc)
+    const [pcData, inkReturnsList] = await Promise.all([
+      getPrintCard(pc),
+      getInkReturns(machineId),
+    ])
     if (requestId !== loadRequestRef.current) return
+
+    const inkReturnsMap = new Map(inkReturnsList.map(r => [r.pantone, r]))
+    setInkReturns(inkReturnsMap)
 
     const anchoVal = pcData?.ancho ?? 0
     const maquinaVal = pcData?.maquina ?? ""
@@ -136,9 +285,11 @@ export default function MaquinaPage() {
       const bcm = tinta?.bcm ?? 0
       const densidad = tinta?.densidad ?? 0
       const anilox = tinta?.anilox ?? 0
+      const ret = inkReturnsMap.get(colorRow.pantone)
+      const kgDisponibles = ret?.confirmado === true ? ret.kg_disponibles : 0
 
       const { kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
-        metros, anchoVal, bcm, densidad, cobertura, kgBase
+        metros, anchoVal, bcm, densidad, cobertura, kgBase, kgDisponibles
       )
 
       nuevasFilas.push({
@@ -151,7 +302,7 @@ export default function MaquinaPage() {
         kgTinta,
         kgDisolvente,
         anilox,
-        kgEnMaquina: "",
+        kgEnMaquina: kgDisponibles > 0 ? String(kgDisponibles) : "",
         viscosidad: "",
         enviando: false,
       })
@@ -169,12 +320,12 @@ export default function MaquinaPage() {
     setLoadingPC(false)
     setAnchoCm(0)
     setMaquinaNombre("")
+    setInkReturns(new Map())
   }, [normalizedId])
 
-  // Cargar cuando llega el Print Card del hub
   useEffect(() => {
     if (printCard) {
-      void cargarColores(printCard, metrosRestantes)
+      void cargarColores(printCard, metrosRestantes, normalizedId)
       return
     }
     loadRequestRef.current += 1
@@ -184,14 +335,11 @@ export default function MaquinaPage() {
     setMaquinaNombre("")
   }, [printCard, metrosRestantes, cargarColores])
 
-  // Recalcular kg cuando cambia la velocidad (no afecta kg, solo urgencia)
-  // Recalcular kg de una fila cuando se edita BCM, densidad, cobertura
   function actualizarFila(index: number, campo: keyof FilaColor, valor: string) {
     setFilas(prev => {
       const nuevas = [...prev]
       const fila = { ...nuevas[index], [campo]: valor }
 
-      // Recalcular kg si cambian cualquier parámetro que afecta el cálculo
       if (["bcm", "densidad", "cobertura", "kgEnMaquina"].includes(campo)) {
         const bcm = campo === "bcm" ? parseFloat(valor) || 0 : parseFloat(String(fila.bcm)) || 0
         const densidad = campo === "densidad" ? parseFloat(valor) || 0 : fila.densidad
@@ -214,12 +362,10 @@ export default function MaquinaPage() {
 
   function getMissingFields(fila: FilaColor) {
     const faltantes: string[] = []
-
     if (!(parseFloat(velocidad) > 0)) faltantes.push("Velocidad de la máquina")
     if (!(anchoCm > 0)) faltantes.push("Ancho")
     if (!(parseFloat(fila.kgEnMaquina) > 0)) faltantes.push("Kg en máquina")
     if (!(parseFloat(fila.viscosidad) > 0)) faltantes.push("Viscosidad")
-
     return faltantes
   }
 
@@ -228,10 +374,7 @@ export default function MaquinaPage() {
     const faltantes = getMissingFields(fila)
 
     if (faltantes.length > 0) {
-      setValidationWarning({
-        color: fila.color,
-        campos: faltantes,
-      })
+      setValidationWarning({ color: fila.color, campos: faltantes })
       return
     }
 
@@ -267,12 +410,49 @@ export default function MaquinaPage() {
     setFilas(prev => prev.map((f, i) => i === index ? { ...f, enviando: false } : f))
   }
 
+  async function confirmarDevolucion() {
+    if (!returnModal) return
+    const nuevoKg = Math.max(0, parseFloat(returnKgInput) || 0)
+    setReturningInk(true)
+    try {
+      if (nuevoKg === 0) {
+        if (returnModal.existingId) {
+          await deleteInkReturn(returnModal.existingId)
+          setInkReturns(prev => { const m = new Map(prev); m.delete(returnModal.pantone); return m })
+          actualizarFila(returnModal.rowIndex, "kgEnMaquina", "0")
+        }
+      } else if (returnModal.existingId) {
+        const updated = await updateInkReturn(returnModal.existingId, nuevoKg)
+        if (updated) {
+          setInkReturns(prev => new Map(prev).set(returnModal.pantone, updated))
+          if (updated.confirmado) {
+            actualizarFila(returnModal.rowIndex, "kgEnMaquina", String(updated.kg_disponibles))
+          }
+        }
+      } else {
+        const created = await createInkReturn(normalizedId, returnModal.pantone, nuevoKg)
+        if (created) {
+          setInkReturns(prev => new Map(prev).set(returnModal.pantone, created))
+          // kgEnMaquina no se pre-llena hasta que cocina confirme la recepción
+        }
+      }
+      toast.success("Devolución registrada", { description: `${returnModal.pantone} · ${nuevoKg} kg` })
+      setReturnModal(null)
+      setReturnKgInput("")
+    } catch {
+      toast.error("Error al registrar la devolución")
+    } finally {
+      setReturningInk(false)
+    }
+  }
+
+  // ── Loading / empty states ──────────────────────────────────────────────────
   if (cargando) {
     return (
-      <div className="flex items-center justify-center py-20">
+      <div className="flex items-center justify-center py-24">
         <div className="flex flex-col items-center gap-3 text-muted-foreground">
-          <LoaderCircle className="h-10 w-10 animate-spin" />
-          <p className="text-sm">Cargando datos de la prensa...</p>
+          <LoaderCircle className="h-9 w-9 animate-spin text-primary/50" />
+          <p className="text-sm">Cargando datos de la prensa…</p>
         </div>
       </div>
     )
@@ -280,387 +460,315 @@ export default function MaquinaPage() {
 
   if (!tableroActual) {
     return (
-      <div className="flex items-center justify-center py-20">
-        <p className="text-muted-foreground">No hay datos para esta prensa en el hub</p>
+      <div className="flex items-center justify-center py-24">
+        <div className="flex flex-col items-center gap-2 text-muted-foreground">
+          <AlertCircle className="h-9 w-9 opacity-30" />
+          <p className="text-sm">No hay datos para esta prensa en el hub</p>
+        </div>
       </div>
     )
   }
 
   const velNum = parseFloat(velocidad) || 0
   const tiempoMin = velNum > 0 ? calcularTiempoMinutos(metrosRestantes, velNum) : null
-  const urgencia = tiempoMin !== null ? determinarUrgencia(tiempoMin) : null
 
+  // ── Page ───────────────────────────────────────────────────────────────────
   return (
     <div className="flex flex-col gap-6">
-      {/* Header */}
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        <div className="flex items-center gap-3">
-          <Link href="/">
-            <Button variant="ghost" size="icon" className="shrink-0">
-              <ArrowLeft className="h-4 w-4" />
-            </Button>
-          </Link>
-          <div>
-            <div className="flex items-center gap-2 flex-wrap">
-              <h2 className="text-2xl font-bold text-foreground">{nombreMaquina}</h2>
-              <Badge
-                variant="outline"
-                className={estado === "activa"
-                  ? "bg-emerald-100 text-emerald-800 border-emerald-300"
-                  : "bg-amber-100 text-amber-800 border-amber-300"}
-              >
-                {estado === "activa" ? "Activa" : "Cambio"}
-              </Badge>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {tableroActual.orden} · {tableroActual.producto}
-            </p>
+
+      {/* ── Header ── */}
+      <div className="flex items-start gap-3">
+        <Link href="/">
+          <Button variant="ghost" size="icon" className="h-8 w-8 mt-0.5 shrink-0 text-muted-foreground hover:text-foreground">
+            <ArrowLeft className="h-4 w-4" />
+          </Button>
+        </Link>
+        <div className="flex-1 min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <h2 className="text-xl font-bold text-foreground">{nombreMaquina}</h2>
+            <Badge
+              variant="outline"
+              className={cn(
+                "text-[11px] font-semibold",
+                estado === "activa"
+                  ? "bg-emerald-500/10 text-emerald-600 border-emerald-300 dark:text-emerald-400"
+                  : "bg-amber-500/10 text-amber-600 border-amber-300 dark:text-amber-400"
+              )}
+            >
+              {estado === "activa" ? "Activa" : "Cambio"}
+            </Badge>
+          </div>
+          <p className="text-sm text-muted-foreground mt-0.5 truncate">
+            {tableroActual.orden}
+            {tableroActual.producto ? ` · ${tableroActual.producto}` : ""}
+          </p>
+          <div className="flex flex-wrap items-center gap-3 mt-1">
             {printCard && (
-              <p className="text-xs font-mono text-muted-foreground">
-                Print Card: <span className="font-bold text-foreground">{printCard}</span>
-              </p>
+              <span className="text-[11px] font-mono text-muted-foreground">
+                Print Card: <span className="text-foreground font-semibold">{printCard}</span>
+              </span>
             )}
-            <p className="text-xs text-muted-foreground">
-              Hub: {connectionState}{error ? ` · ${error}` : ""}
-            </p>
+            <span className={cn(
+              "text-[11px] font-medium",
+              connectionState === "Connected" ? "text-emerald-600 dark:text-emerald-400" : "text-muted-foreground"
+            )}>
+              {connectionState === "Connected" ? "● En vivo" : `○ ${connectionState}`}
+              {error ? ` · ${error}` : ""}
+            </span>
           </div>
         </div>
       </div>
 
-      {/* Métricas */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Progreso</CardTitle>
-            <Printer className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="mb-2 text-2xl font-bold font-mono text-foreground">{progreso}%</div>
-            <Progress value={progreso} className="h-2" />
-            <p className="mt-1 text-xs text-muted-foreground">{metrosRestantes.toLocaleString()}m restantes</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Metros Totales</CardTitle>
-            <Ruler className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold font-mono text-foreground">{metrosTotales.toLocaleString()}</div>
-            <p className="text-xs text-muted-foreground">metros lineales</p>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Velocidad Actual</CardTitle>
-            <Gauge className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <Input
-              type="number"
-              placeholder="m/min"
-              value={velocidad}
-              onChange={e => setVelocidad(e.target.value)}
-              className="text-2xl font-bold font-mono h-10"
-            />
-            <p className="mt-1 text-xs text-muted-foreground">
+      {/* ── Metrics row ── */}
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        {/* Progreso */}
+        <StatCard icon={Printer} label="Progreso">
+          <div className="space-y-2">
+            <div className="flex items-end justify-between">
+              <span className="text-2xl font-bold font-mono text-foreground leading-none">{progreso}%</span>
+              <span className="text-xs text-muted-foreground pb-0.5">
+                {metrosRestantes.toLocaleString()} m restantes
+              </span>
+            </div>
+            <Progress value={progreso} className="h-1.5 bg-muted/40" />
+          </div>
+        </StatCard>
+
+        {/* Metros totales */}
+        <StatCard
+          icon={Ruler}
+          label="Metros Totales"
+          value={metrosTotales.toLocaleString()}
+          sub="metros lineales"
+        />
+
+        {/* Velocidad — operador la ingresa */}
+        <StatCard icon={Gauge} label="Velocidad de máquina">
+          <div className="space-y-1.5">
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                placeholder="m/min"
+                value={velocidad}
+                onChange={e => setVelocidad(e.target.value)}
+                className="h-9 font-mono text-lg font-bold"
+              />
+              <span className="text-xs text-muted-foreground whitespace-nowrap">m/min</span>
+            </div>
+            <p className="text-xs text-muted-foreground">
               {tiempoMin !== null && tiempoMin !== 999
-                ? <>Tiempo restante: <span className="font-medium">{tiempoMin} min</span></>
+                ? <><span className="text-foreground font-medium">{tiempoMin} min</span> restantes</>
                 : "ingresa para calcular urgencia"}
             </p>
-          </CardContent>
-        </Card>
-        {/* Print Card preview */}
-        <Card className="overflow-hidden">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-              <FileText className="h-4 w-4" />
-              Print Card
-            </CardTitle>
-            {printCard && (
-              <div className="flex items-center gap-1">
-                <Button variant="ghost" size="icon" className="h-6 w-6" title="Ver en pantalla completa"
-                  onClick={() => { setPcZoom(1); setPcModalOpen(true) }}>
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </Button>
-                <a href={`http://172.16.10.31/api/Printcard/${printCard}`} target="_blank" rel="noopener noreferrer">
-                  <Button variant="ghost" size="icon" className="h-6 w-6" title="Abrir en nueva pestaña">
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </Button>
-                </a>
-              </div>
-            )}
-          </CardHeader>
-          <CardContent className="p-0">
-            {printCard ? (
-              <button
-                className="w-full cursor-zoom-in focus:outline-none"
-                onClick={() => { setPcZoom(1); setPcModalOpen(true) }}
-                title="Click para ampliar"
-              >
-                <iframe
-                  src={`/api/printcard/${encodeURIComponent(printCard)}`}
-                  className="w-full h-36 border-0 pointer-events-none"
-                  title={`Print Card ${printCard}`}
-                />
-              </button>
-            ) : (
-              <div className="flex items-center justify-center h-36 text-sm text-muted-foreground">
-                Sin Print Card asignado
-              </div>
-            )}
-          </CardContent>
-        </Card>
+          </div>
+        </StatCard>
 
-        {/* Modal Print Card */}
-        <Dialog open={pcModalOpen} onOpenChange={open => { setPcModalOpen(open); if (!open) setPcZoom(1) }}>
-          <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
-            <DialogHeader className="flex flex-row items-center justify-between px-4 py-3 border-b shrink-0">
-              <DialogTitle className="text-sm font-mono">{printCard}</DialogTitle>
-              <div className="flex items-center gap-1 mr-8">
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Zoom out"
-                  onClick={() => setPcZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)))}>
-                  <ZoomOut className="h-4 w-4" />
-                </Button>
-                <span className="text-xs font-mono w-10 text-center">{Math.round(pcZoom * 100)}%</span>
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Zoom in"
-                  onClick={() => setPcZoom(z => Math.min(4, +(z + 0.25).toFixed(2)))}>
-                  <ZoomIn className="h-4 w-4" />
-                </Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Resetear zoom"
-                  onClick={() => setPcZoom(1)}>
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </Button>
-                <a href={`http://172.16.10.31/api/Printcard/${printCard}`} target="_blank" rel="noopener noreferrer">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" title="Abrir en nueva pestaña">
-                    <ExternalLink className="h-4 w-4" />
-                  </Button>
-                </a>
-              </div>
-            </DialogHeader>
-            <div
-              className="flex-1 overflow-auto"
-              onWheel={e => {
-                e.preventDefault()
-                setPcZoom(z => Math.min(4, Math.max(0.5, +(z + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))))
-              }}
-            >
-              <iframe
-                src={`/api/printcard/${encodeURIComponent(printCard)}`}
-                title={`Print Card ${printCard}`}
-                style={{
-                  width: `${100 / pcZoom}%`,
-                  height: `${100 / pcZoom}%`,
-                  minHeight: "100%",
-                  border: "none",
-                  transform: `scale(${pcZoom})`,
-                  transformOrigin: "top left",
-                  display: "block",
-                }}
-              />
+        {/* Droplets — ink summary */}
+        <StatCard icon={Droplets} label="Colores / Solicitudes">
+          <div className="flex items-end justify-between">
+            <span className="text-2xl font-bold font-mono text-foreground leading-none">{filas.length}</span>
+            <div className="text-right">
+              {solicitudesMaquina.length > 0 && (
+                <Badge className="bg-urgency-red text-white text-[10px]">
+                  {solicitudesMaquina.length} activa{solicitudesMaquina.length > 1 ? "s" : ""}
+                </Badge>
+              )}
             </div>
-          </DialogContent>
-        </Dialog>
-
-        {/* Card Ficha Técnica */}
-        <Card className="overflow-hidden">
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground flex items-center gap-1.5">
-              <FileText className="h-4 w-4" />
-              Ficha Técnica
-            </CardTitle>
-            {printCard && (
-              <div className="flex items-center gap-1">
-                <Button variant="ghost" size="icon" className="h-6 w-6" title="Ver en pantalla completa"
-                  onClick={() => { setFichaZoom(1); setFichaModalOpen(true) }}>
-                  <Maximize2 className="h-3.5 w-3.5" />
-                </Button>
-                <a href={`http://172.16.10.31/api/Printcard/ficha/${printCard}`} target="_blank" rel="noopener noreferrer">
-                  <Button variant="ghost" size="icon" className="h-6 w-6" title="Abrir en nueva pestaña">
-                    <ExternalLink className="h-3.5 w-3.5" />
-                  </Button>
-                </a>
-              </div>
-            )}
-          </CardHeader>
-          <CardContent className="p-0">
-            {printCard ? (
-              <button
-                className="w-full cursor-zoom-in focus:outline-none"
-                onClick={() => { setFichaZoom(1); setFichaModalOpen(true) }}
-                title="Click para ampliar"
-              >
-                <iframe
-                  src={`/api/printcard/ficha/${encodeURIComponent(printCard)}`}
-                  className="w-full h-36 border-0 pointer-events-none"
-                  title={`Ficha Técnica ${printCard}`}
-                />
-              </button>
-            ) : (
-              <div className="flex items-center justify-center h-36 text-sm text-muted-foreground">
-                Sin ficha técnica asignada
-              </div>
-            )}
-          </CardContent>
-        </Card>
-
-        {/* Modal Ficha Técnica */}
-        <Dialog open={fichaModalOpen} onOpenChange={open => { setFichaModalOpen(open); if (!open) setFichaZoom(1) }}>
-          <DialogContent className="max-w-5xl w-[95vw] h-[90vh] flex flex-col p-0 gap-0">
-            <DialogHeader className="flex flex-row items-center justify-between px-4 py-3 border-b shrink-0">
-              <DialogTitle className="text-sm font-mono">Ficha Técnica · {printCard}</DialogTitle>
-              <div className="flex items-center gap-1 mr-8">
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Zoom out"
-                  onClick={() => setFichaZoom(z => Math.max(0.5, +(z - 0.25).toFixed(2)))}>
-                  <ZoomOut className="h-4 w-4" />
-                </Button>
-                <span className="text-xs font-mono w-10 text-center">{Math.round(fichaZoom * 100)}%</span>
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Zoom in"
-                  onClick={() => setFichaZoom(z => Math.min(4, +(z + 0.25).toFixed(2)))}>
-                  <ZoomIn className="h-4 w-4" />
-                </Button>
-                <Button variant="ghost" size="icon" className="h-7 w-7" title="Resetear zoom"
-                  onClick={() => setFichaZoom(1)}>
-                  <RotateCcw className="h-3.5 w-3.5" />
-                </Button>
-                <a href={`http://172.16.10.31/api/Printcard/ficha/${printCard}`} target="_blank" rel="noopener noreferrer">
-                  <Button variant="ghost" size="icon" className="h-7 w-7" title="Abrir en nueva pestaña">
-                    <ExternalLink className="h-4 w-4" />
-                  </Button>
-                </a>
-              </div>
-            </DialogHeader>
-            <div
-              className="flex-1 overflow-auto"
-              onWheel={e => {
-                e.preventDefault()
-                setFichaZoom(z => Math.min(4, Math.max(0.5, +(z + (e.deltaY < 0 ? 0.1 : -0.1)).toFixed(2))))
-              }}
-            >
-              <iframe
-                src={`/api/printcard/ficha/${encodeURIComponent(printCard)}`}
-                title={`Ficha Técnica ${printCard}`}
-                style={{
-                  width: `${100 / fichaZoom}%`,
-                  height: `${100 / fichaZoom}%`,
-                  minHeight: "100%",
-                  border: "none",
-                  transform: `scale(${fichaZoom})`,
-                  transformOrigin: "top left",
-                  display: "block",
-                }}
-              />
-            </div>
-          </DialogContent>
-        </Dialog>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {loadingPC ? "Cargando…" : filas.length > 0 ? "cuerpos impresores" : "sin print card"}
+          </p>
+        </StatCard>
       </div>
 
-      <AlertDialog open={validationWarning !== null} onOpenChange={(open) => {
-        if (!open) setValidationWarning(null)
-      }}>
+      {/* ── Documents row ── */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <DocCard
+          label="Print Card"
+          printCard={printCard}
+          src={printCard ? `/api/printcard/${encodeURIComponent(printCard)}` : ""}
+          fullSrc={`http://172.16.10.31/api/Printcard/${printCard}`}
+          onExpand={() => { setPcZoom(1); setPcModalOpen(true) }}
+        />
+        <DocCard
+          label="Ficha Técnica"
+          printCard={printCard}
+          src={printCard ? `/api/printcard/ficha/${encodeURIComponent(printCard)}` : ""}
+          fullSrc={`http://172.16.10.31/api/Printcard/ficha/${printCard}`}
+          onExpand={() => { setFichaZoom(1); setFichaModalOpen(true) }}
+        />
+      </div>
+
+      {/* ── Zoom modals ── */}
+      <ZoomModal
+        open={pcModalOpen}
+        onClose={() => setPcModalOpen(false)}
+        title={printCard}
+        src={`/api/printcard/${encodeURIComponent(printCard)}`}
+        fullSrc={`http://172.16.10.31/api/Printcard/${printCard}`}
+        zoom={pcZoom}
+        onZoom={setPcZoom}
+      />
+      <ZoomModal
+        open={fichaModalOpen}
+        onClose={() => setFichaModalOpen(false)}
+        title={`Ficha Técnica · ${printCard}`}
+        src={`/api/printcard/ficha/${encodeURIComponent(printCard)}`}
+        fullSrc={`http://172.16.10.31/api/Printcard/ficha/${printCard}`}
+        zoom={fichaZoom}
+        onZoom={setFichaZoom}
+      />
+
+      {/* ── Validation dialog ── */}
+      <AlertDialog open={validationWarning !== null} onOpenChange={open => { if (!open) setValidationWarning(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Faltan datos para calcular la solicitud</AlertDialogTitle>
             <AlertDialogDescription asChild>
               <div className="space-y-3">
                 <p>
-                  {validationWarning
-                    ? <>Completa estos datos en <strong>{validationWarning.color}</strong> antes de solicitar la tinta:</>
-                    : null}
+                  {validationWarning && (
+                    <>Completa estos datos en <strong>{validationWarning.color}</strong> antes de solicitar:</>
+                  )}
                 </p>
                 {validationWarning && (
                   <ul className="list-disc space-y-1 pl-5 text-sm text-foreground">
-                    {validationWarning.campos.map((campo) => (
-                      <li key={campo}>{campo}</li>
-                    ))}
+                    {validationWarning.campos.map(campo => <li key={campo}>{campo}</li>)}
                   </ul>
                 )}
               </div>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogAction onClick={() => setValidationWarning(null)}>
-              Entendido
-            </AlertDialogAction>
+            <AlertDialogAction onClick={() => setValidationWarning(null)}>Entendido</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
 
-      {/* Notificaciones */}
-      {notificacionesMaquina.length > 0 && (
-        <div>
-          <h3 className="mb-3 text-lg font-semibold text-foreground">Notificaciones Activas</h3>
-          <div className="flex flex-col gap-2">
-            {notificacionesMaquina.map(n => (
-              <div key={n.id} className="flex items-center gap-2">
-                <div className="flex-1">
-                  <FlashingAlert tipo={n.tipo} mensaje={n.mensaje} timestamp={n.timestamp} leida={n.leida} />
-                </div>
-                {n.tipo === "fabricado" && (
-                  <Button size="sm" onClick={() => confirmarRecepcion(n.solicitudId)}>Confirmar</Button>
+      {/* ── Return modal ── */}
+      {returnModal && (
+        <Dialog open onOpenChange={open => { if (!open) { setReturnModal(null); setReturnKgInput("") } }}>
+          <DialogContent className="sm:max-w-sm">
+            <DialogHeader>
+              <DialogTitle>Devolver tinta sobrante</DialogTitle>
+            </DialogHeader>
+            <div className="space-y-4 pt-1">
+              <div>
+                <p className="text-sm font-semibold">{returnModal.pantone}</p>
+                {returnModal.existingKg > 0 && (
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    Actualmente registrado: {returnModal.existingKg} kg disponibles
+                  </p>
                 )}
               </div>
-            ))}
-          </div>
-        </div>
+              <div className="space-y-1.5">
+                <label className="text-xs font-medium">Kg disponibles en máquina</label>
+                <Input
+                  type="number"
+                  step="0.1"
+                  min="0"
+                  value={returnKgInput}
+                  onChange={e => setReturnKgInput(e.target.value)}
+                  placeholder="0.0"
+                  className="font-mono"
+                  autoFocus
+                  onKeyDown={e => { if (e.key === "Enter") void confirmarDevolucion() }}
+                />
+                <p className="text-[10px] text-muted-foreground">
+                  {parseFloat(returnKgInput) === 0 && returnModal.existingId
+                    ? "El registro se eliminará."
+                    : "Quedará pendiente de confirmación por cocina antes de usarse en el cálculo."}
+                </p>
+              </div>
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" size="sm" onClick={() => { setReturnModal(null); setReturnKgInput("") }}>
+                  Cancelar
+                </Button>
+                <Button size="sm" onClick={() => void confirmarDevolucion()} disabled={returningInk}>
+                  {returningInk ? <LoaderCircle className="h-3 w-3 animate-spin" /> : "Confirmar"}
+                </Button>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       )}
 
-      {/* Solicitudes activas */}
+      {/* ── Active notifications ── */}
+      {notificacionesMaquina.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h3 className="text-sm font-semibold text-foreground flex items-center gap-1.5">
+            <Activity className="h-4 w-4 text-urgency-red" />
+            Notificaciones activas
+          </h3>
+          {notificacionesMaquina.map(n => (
+            <div key={n.id} className="flex items-center gap-2">
+              <div className="flex-1">
+                <FlashingAlert tipo={n.tipo} mensaje={n.mensaje} timestamp={n.timestamp} leida={n.leida} />
+              </div>
+              {n.tipo === "fabricado" && (
+                <Button size="sm" onClick={() => confirmarRecepcion(n.solicitudId)}>Confirmar</Button>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {/* ── Active requests ── */}
       {solicitudesMaquina.length > 0 && (
-        <div>
-          <h3 className="mb-3 text-lg font-semibold text-foreground">Solicitudes Activas</h3>
-          <div className="flex flex-col gap-2">
-            {solicitudesMaquina.map(s => (
-              <Card key={s.id} className="p-4">
-                <div className="flex flex-wrap items-center gap-4">
-                  <div>
-                    <p className="text-sm font-semibold text-foreground">{s.id} · Cuerpo {s.cuerpoNumero}</p>
-                    <p className="text-xs text-muted-foreground">{s.color}</p>
-                  </div>
-                  <div className="text-sm">
-                    <span className="text-muted-foreground">Kg: </span>
-                    <span className="font-mono font-semibold">{s.kgAFabricar}</span>
-                  </div>
-                  <UrgencyBadge urgencia={s.urgencia} tiempoMin={s.tiempoEstimadoMin} />
-                  <StatusBadge estado={s.estado} />
-                  {s.estado === "fabricado" && (
-                    <Button size="sm" onClick={() => confirmarRecepcion(s.id)}>Confirmar Recepción</Button>
-                  )}
+        <section className="flex flex-col gap-2">
+          <h3 className="text-sm font-semibold text-foreground">Solicitudes activas</h3>
+          {solicitudesMaquina.map(s => (
+            <div key={s.id} className="rounded-xl border bg-card px-4 py-3">
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-foreground">{s.id} · Cuerpo {s.cuerpoNumero}</p>
+                  <p className="text-xs text-muted-foreground">{s.color}</p>
                 </div>
-              </Card>
-            ))}
-          </div>
-        </div>
+                <div className="text-sm">
+                  <span className="text-muted-foreground">Kg: </span>
+                  <span className="font-mono font-bold">{s.kgAFabricar}</span>
+                </div>
+                <UrgencyBadge urgencia={s.urgencia} tiempoMin={s.tiempoEstimadoMin} />
+                <StatusBadge estado={s.estado} />
+                {s.estado === "fabricado" && (
+                  <Button size="sm" onClick={() => confirmarRecepcion(s.id)}>Confirmar Recepción</Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </section>
       )}
 
-      {/* Cuerpos Impresores */}
-      <div>
-        <h3 className="mb-3 text-lg font-semibold text-foreground">Cuerpos Impresores</h3>
-        <Card>
+      {/* ── Color table ── */}
+      <section className="flex flex-col gap-2">
+        <h3 className="text-sm font-semibold text-foreground">Cuerpos Impresores</h3>
+
+        <div className="rounded-xl border bg-card overflow-hidden">
           {loadingPC ? (
-            <CardContent className="py-10 flex items-center justify-center gap-3 text-muted-foreground">
-              <LoaderCircle className="h-5 w-5 animate-spin" />
-              <span className="text-sm">Cargando colores del Print Card...</span>
-            </CardContent>
+            <div className="py-12 flex items-center justify-center gap-3 text-muted-foreground">
+              <LoaderCircle className="h-5 w-5 animate-spin text-primary/50" />
+              <span className="text-sm">Cargando colores del Print Card…</span>
+            </div>
           ) : filas.length === 0 ? (
-            <CardContent className="py-10 text-center text-sm text-muted-foreground">
+            <div className="py-12 text-center text-sm text-muted-foreground">
               {printCard
                 ? `No se encontraron colores para ${printCard}`
                 : "Sin Print Card asignado a esta orden"}
-            </CardContent>
+            </div>
           ) : (
-            <div className="overflow-x-auto">
-              {(
-                <div className="flex items-center gap-3 px-4 py-3 border-b bg-amber-50 dark:bg-amber-950/30">
-                  <span className="text-sm text-amber-700 dark:text-amber-400">
-                    {anchoCm > 0
-                      ? <>Ancho cargado: <strong>{Math.round(anchoCm * 10)} mm</strong> — verificar contra Print Card y corregir si es necesario:</>
-                      : "Ancho de bobina no disponible — ingrésalo en mm (ej: 584):"}
-                  </span>
+            <>
+              {/* Ancho banner */}
+              <div className="flex flex-wrap items-center gap-3 px-4 py-2.5 bg-amber-500/5 border-b border-amber-500/20">
+                <span className="text-xs text-amber-700 dark:text-amber-400">
+                  {anchoCm > 0
+                    ? <>Ancho cargado: <strong>{Math.round(anchoCm * 10)} mm</strong> — verifica contra Print Card:</>
+                    : "Ancho de bobina no disponible — ingrésalo en mm:"}
+                </span>
+                <div className="flex items-center gap-2">
                   <Input
                     type="number"
                     placeholder="mm"
-                    className="w-24 h-8 text-sm font-mono"
+                    className="w-20 h-7 text-xs font-mono"
                     value={anchoInput}
                     onChange={e => setAnchoInput(e.target.value)}
                     onKeyDown={e => {
@@ -680,11 +788,11 @@ export default function MaquinaPage() {
                       }
                     }}
                   />
-                  <span className="text-sm text-muted-foreground">mm</span>
                   <Button
                     type="button"
                     size="sm"
                     variant="outline"
+                    className="h-7 text-xs"
                     onClick={() => {
                       const valCm = (parseFloat(anchoInput) || 0) / 10
                       if (!valCm) return
@@ -702,157 +810,190 @@ export default function MaquinaPage() {
                     Calcular
                   </Button>
                 </div>
-              )}
-              <table className="w-full text-sm">
-                <thead>
-                  <tr className="border-b text-muted-foreground">
-                    <th className="px-4 py-3 text-left font-medium">#</th>
-                    <th className="px-4 py-3 text-left font-medium">Color</th>
-                    <th className="px-4 py-3 text-right font-medium">Anilox (LPI)</th>
-                    <th className="px-4 py-3 text-right font-medium">BCM (cm³/m²)</th>
-                    <th className="px-4 py-3 text-right font-medium">Densidad</th>
-                    <th className="px-4 py-3 text-right font-medium">Cob. %</th>
-                    <th className="px-4 py-3 text-right font-medium">Kg calculados</th>
-                    <th className="px-4 py-3 text-right font-medium">Kg en máquina</th>
-                    <th className="px-4 py-3 text-right font-medium">Viscosidad</th>
-                    <th className="px-4 py-3 text-center font-medium">Urgencia</th>
-                    <th className="px-4 py-3 text-right font-medium">Acción</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filas.map((fila, i) => (
-                    <tr key={i} className="border-b last:border-0 hover:bg-muted/30">
-                      <td className="px-4 py-3 font-mono font-bold text-foreground">{i + 1}</td>
-                      <td className="px-4 py-3">
-                        <div className="font-medium text-foreground">{fila.color}</div>
-                        <div className="text-xs text-muted-foreground">{fila.tinta}</div>
-                      </td>
-                      {/* Anilox editable */}
-                      <td className="px-4 py-3 text-right">
-                        <Input
-                          type="number"
-                          value={fila.anilox || ""}
-                          onChange={e => actualizarFila(i, "anilox", e.target.value)}
-                          className="w-20 text-right font-mono text-sm h-8 ml-auto"
-                          placeholder="LPI"
-                        />
-                      </td>
-                      {/* BCM editable */}
-                      <td className="px-4 py-3 text-right">
-                        <Input
-                          type="number"
-                          step="0.1"
-                          value={fila.bcm || ""}
-                          onChange={e => actualizarFila(i, "bcm", e.target.value)}
-                          className={`w-20 text-right font-mono text-sm h-8 ml-auto ${!fila.bcm ? "border-amber-400 dark:border-amber-600" : ""}`}
-                          placeholder="BCM"
-                        />
-                      </td>
-                      {/* Densidad editable */}
-                      <td className="px-4 py-3 text-right">
-                        <Input
-                          type="number"
-                          step="0.01"
-                          value={fila.densidad || ""}
-                          onChange={e => actualizarFila(i, "densidad", e.target.value)}
-                          className={`w-20 text-right font-mono text-sm h-8 ml-auto ${!fila.densidad ? "border-amber-400 dark:border-amber-600" : ""}`}
-                          placeholder="g/cm³"
-                        />
-                      </td>
-                      {/* Cobertura editable */}
-                      <td className="px-4 py-3 text-right">
-                        <Input
-                          type="number"
-                          step="0.1"
-                          value={fila.cobertura ? (fila.cobertura * 100).toFixed(1) : ""}
-                          onChange={e => actualizarFila(i, "cobertura", String(parseFloat(e.target.value) / 100 || 0))}
-                          className="w-20 text-right font-mono text-sm h-8 ml-auto"
-                          placeholder="%"
-                        />
-                      </td>
-                      {/* Kg calculados */}
-                      <td className="px-4 py-3 text-right">
-                        {fila.kgBruto > 0 ? (
-                          <div className="flex flex-col items-end gap-0.5">
-                            <span className="font-mono font-bold text-foreground">{fila.kgBruto} kg</span>
-                            {fila.kgTinta < fila.kgBruto && (
-                              <span className="text-xs text-muted-foreground">
-                                pedir: {fila.kgTinta} kg
-                              </span>
-                            )}
-                          </div>
-                        ) : (!fila.bcm || !fila.densidad) ? (
-                          <span className="text-xs text-amber-600 dark:text-amber-400" title="Ingresa BCM y densidad para calcular">
-                            Falta BCM/densidad
-                          </span>
-                        ) : (
-                          <span className="font-mono font-bold text-muted-foreground">—</span>
-                        )}
-                      </td>
-                      {/* Kg en máquina — operador */}
-                      <td className="px-4 py-3 text-right">
-                        {(() => {
-                          const val = parseFloat(fila.kgEnMaquina) || 0
-                          const excede = fila.kgBruto > 0 && val > fila.kgBruto
-                          return (
-                            <>
-                              <Input
-                                type="number"
-                                step="0.1"
-                                value={fila.kgEnMaquina}
-                                onChange={e => actualizarFila(i, "kgEnMaquina", e.target.value)}
-                                className={`w-20 text-right font-mono text-sm h-8 ml-auto ${excede ? "border-red-500 focus-visible:ring-red-500" : ""}`}
-                                placeholder="kg"
-                              />
-                              {excede && (
-                                <p className="mt-0.5 text-xs text-red-500">máx {fila.kgBruto} kg</p>
-                              )}
-                            </>
-                          )
-                        })()}
-                      </td>
-                      {/* Viscosidad — operador */}
-                      <td className="px-4 py-3 text-right">
-                        <Input
-                          type="number"
-                          value={fila.viscosidad}
-                          onChange={e => actualizarFila(i, "viscosidad", e.target.value)}
-                          className="w-20 text-right font-mono text-sm h-8 ml-auto"
-                          placeholder="seg"
-                        />
-                      </td>
-                      {/* Urgencia por color */}
-                      <td className="px-4 py-3 text-center">
-                        {fila.kgEnMaquina && velocidad && fila.bcm ? (() => {
-                          const t = calcularTiempoPorTinta(
-                            parseFloat(fila.kgEnMaquina) || 0,
-                            parseFloat(velocidad) || 0,
-                            anchoCm, fila.bcm, fila.densidad, fila.cobertura
-                          )
-                          const u = determinarUrgencia(t)
-                          return <UrgencyBadge urgencia={u} tiempoMin={t === 999 ? undefined : t} pulsing />
-                        })() : <span className="text-xs text-muted-foreground">—</span>}
-                      </td>
-                      {/* Solicitar */}
-                      <td className="px-4 py-3 text-right">
-                        <Button
-                          size="sm"
-                          onClick={() => solicitarColor(i)}
-                          disabled={fila.enviando}
-                        >
-                          {fila.enviando
-                            ? <LoaderCircle className="h-3 w-3 animate-spin" />
-                            : <><Send className="mr-1 h-3 w-3" />Solicitar</>}
-                        </Button>
-                      </td>
+              </div>
+
+              {/* Table */}
+              <div className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b bg-muted/30">
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">#</th>
+                      <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Color</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Anilox</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">BCM</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Densidad</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Cob. %</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Kg calc.</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Kg máq.</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Viscosidad</th>
+                      <th className="px-4 py-2.5 text-center text-xs font-medium text-muted-foreground">Urgencia</th>
+                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Acción</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody className="divide-y divide-border/60">
+                    {filas.map((fila, i) => (
+                      <tr key={i} className="hover:bg-muted/20 transition-colors">
+                        <td className="px-4 py-3 font-mono font-bold text-muted-foreground text-xs">{i + 1}</td>
+                        <td className="px-4 py-3">
+                          <p className="font-semibold text-foreground text-xs leading-tight">{fila.color}</p>
+                          <p className="text-[10px] text-muted-foreground">{fila.tinta}</p>
+                          {(() => {
+                            const ret = inkReturns.get(fila.color)
+                            if (!ret || ret.kg_disponibles <= 0) return null
+                            return ret.confirmado ? (
+                              <p className="text-[10px] text-emerald-600 dark:text-emerald-400 mt-0.5">
+                                🪣 {ret.kg_disponibles} kg disponibles
+                              </p>
+                            ) : (
+                              <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-0.5">
+                                ⏳ {ret.kg_disponibles} kg pendiente de confirmación
+                              </p>
+                            )
+                          })()}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Input
+                            type="number"
+                            value={fila.anilox || ""}
+                            onChange={e => actualizarFila(i, "anilox", e.target.value)}
+                            className="w-20 text-right font-mono text-xs h-7 ml-auto"
+                            placeholder="LPI"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Input
+                            type="number"
+                            step="0.1"
+                            value={fila.bcm || ""}
+                            onChange={e => actualizarFila(i, "bcm", e.target.value)}
+                            className={cn(
+                              "w-20 text-right font-mono text-xs h-7 ml-auto",
+                              !fila.bcm && "border-amber-400 dark:border-amber-600"
+                            )}
+                            placeholder="BCM"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Input
+                            type="number"
+                            step="0.01"
+                            value={fila.densidad || ""}
+                            onChange={e => actualizarFila(i, "densidad", e.target.value)}
+                            className={cn(
+                              "w-20 text-right font-mono text-xs h-7 ml-auto",
+                              !fila.densidad && "border-amber-400 dark:border-amber-600"
+                            )}
+                            placeholder="g/cm³"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Input
+                            type="number"
+                            step="0.1"
+                            value={fila.cobertura ? (fila.cobertura * 100).toFixed(1) : ""}
+                            onChange={e => actualizarFila(i, "cobertura", String(parseFloat(e.target.value) / 100 || 0))}
+                            className="w-20 text-right font-mono text-xs h-7 ml-auto"
+                            placeholder="%"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {fila.kgBruto > 0 ? (
+                            <div className="flex flex-col items-end gap-0.5">
+                              <span className="font-mono font-bold text-foreground text-xs">{fila.kgBruto} kg</span>
+                              {fila.kgTinta < fila.kgBruto && (
+                                <span className="text-[10px] text-muted-foreground">pedir: {fila.kgTinta} kg</span>
+                              )}
+                            </div>
+                          ) : (!fila.bcm || !fila.densidad) ? (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400">Falta BCM/dens.</span>
+                          ) : (
+                            <span className="font-mono text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {(() => {
+                            const val = parseFloat(fila.kgEnMaquina) || 0
+                            const excede = fila.kgBruto > 0 && val > fila.kgBruto
+                            return (
+                              <div>
+                                <Input
+                                  type="number"
+                                  step="0.1"
+                                  value={fila.kgEnMaquina}
+                                  onChange={e => actualizarFila(i, "kgEnMaquina", e.target.value)}
+                                  className={cn(
+                                    "w-20 text-right font-mono text-xs h-7 ml-auto",
+                                    excede && "border-red-500 focus-visible:ring-red-500"
+                                  )}
+                                  placeholder="kg"
+                                />
+                                {excede && (
+                                  <p className="mt-0.5 text-[10px] text-red-500 text-right">máx {fila.kgBruto}</p>
+                                )}
+                              </div>
+                            )
+                          })()}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <Input
+                            type="number"
+                            value={fila.viscosidad}
+                            onChange={e => actualizarFila(i, "viscosidad", e.target.value)}
+                            className="w-20 text-right font-mono text-xs h-7 ml-auto"
+                            placeholder="seg"
+                          />
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {fila.kgEnMaquina && velocidad && fila.bcm ? (() => {
+                            const t = calcularTiempoPorTinta(
+                              parseFloat(fila.kgEnMaquina) || 0,
+                              parseFloat(velocidad) || 0,
+                              anchoCm, fila.bcm, fila.densidad, fila.cobertura
+                            )
+                            const u = determinarUrgencia(t)
+                            return <UrgencyBadge urgencia={u} tiempoMin={t === 999 ? undefined : t} pulsing />
+                          })() : <span className="text-xs text-muted-foreground/50">—</span>}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          <div className="flex flex-col items-end gap-1">
+                            <Button
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => solicitarColor(i)}
+                              disabled={fila.enviando}
+                            >
+                              {fila.enviando
+                                ? <LoaderCircle className="h-3 w-3 animate-spin" />
+                                : <><Send className="mr-1 h-3 w-3" />Solicitar</>}
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-7 text-xs"
+                              onClick={() => {
+                                const ret = inkReturns.get(fila.color)
+                                setReturnModal({
+                                  rowIndex: i,
+                                  pantone: fila.color,
+                                  existingId: ret?.id ?? null,
+                                  existingKg: ret?.kg_disponibles ?? 0,
+                                })
+                                setReturnKgInput(ret ? String(ret.kg_disponibles) : "")
+                              }}
+                            >
+                              <Undo2 className="mr-1 h-3 w-3" />Devolver
+                            </Button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
-        </Card>
-      </div>
+        </div>
+      </section>
     </div>
   )
 }

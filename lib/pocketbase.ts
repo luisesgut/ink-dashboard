@@ -159,6 +159,137 @@ export function calcularTiempoPorTinta(
   return Math.round(kgEnMaquina / consumoPorMinuto)
 }
 
+export interface InkReturn {
+  id: string
+  machine_id: string
+  pantone: string
+  kg_disponibles: number
+  confirmado: boolean
+  created: string
+  updated: string
+}
+
+function mapInkReturn(item: Record<string, unknown>): InkReturn {
+  return {
+    id: String(item.id ?? ""),
+    machine_id: String(item.machine_id ?? ""),
+    pantone: String(item.pantone ?? ""),
+    kg_disponibles: parseFloat(String(item.kg_disponibles ?? "0")) || 0,
+    confirmado: Boolean(item.confirmado),
+    created: String(item.created ?? ""),
+    updated: String(item.updated ?? ""),
+  }
+}
+
+export async function getInkReturns(machineId: string): Promise<InkReturn[]> {
+  try {
+    const res = await fetch(
+      `${PB_URL}/api/collections/ink_returns/records?filter=(machine_id='${encodeURIComponent(machineId)}')&perPage=200`
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.items ?? []).map(mapInkReturn)
+  } catch (e) {
+    console.error("Error fetching ink_returns:", e)
+    return []
+  }
+}
+
+export async function getPendingInkReturns(): Promise<InkReturn[]> {
+  try {
+    const filter = encodeURIComponent("(confirmado=false)")
+    const res = await fetch(
+      `${PB_URL}/api/collections/ink_returns/records?filter=${filter}&sort=-created&perPage=200`
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.items ?? []).map(mapInkReturn)
+  } catch (e) {
+    console.error("Error fetching pending ink_returns:", e)
+    return []
+  }
+}
+
+export async function getConfirmedInkReturns(): Promise<InkReturn[]> {
+  const since = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    .toISOString()
+    .replace("T", " ")
+    .slice(0, 19)
+  const filter = encodeURIComponent(`(confirmado=true&&updated>='${since}')`)
+  try {
+    const res = await fetch(
+      `${PB_URL}/api/collections/ink_returns/records?filter=${filter}&sort=-updated&perPage=200`
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.items ?? []).map(mapInkReturn)
+  } catch (e) {
+    console.error("Error fetching confirmed ink_returns:", e)
+    return []
+  }
+}
+
+export async function confirmInkReturn(id: string): Promise<InkReturn | null> {
+  try {
+    const res = await fetch(`${PB_URL}/api/collections/ink_returns/records/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmado: true }),
+    })
+    if (!res.ok) return null
+    return mapInkReturn(await res.json())
+  } catch (e) {
+    console.error("Error confirming ink_return:", e)
+    return null
+  }
+}
+
+export async function createInkReturn(
+  machineId: string,
+  pantone: string,
+  kgDisponibles: number
+): Promise<InkReturn | null> {
+  try {
+    const res = await fetch(`${PB_URL}/api/collections/ink_returns/records`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ machine_id: machineId, pantone, kg_disponibles: kgDisponibles, confirmado: false }),
+    })
+    if (!res.ok) return null
+    return mapInkReturn(await res.json())
+  } catch (e) {
+    console.error("Error creating ink_return:", e)
+    return null
+  }
+}
+
+export async function updateInkReturn(id: string, kgDisponibles: number): Promise<InkReturn | null> {
+  try {
+    const res = await fetch(`${PB_URL}/api/collections/ink_returns/records/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kg_disponibles: kgDisponibles }),
+    })
+    if (!res.ok) return null
+    return mapInkReturn(await res.json())
+  } catch (e) {
+    console.error("Error updating ink_return:", e)
+    return null
+  }
+}
+
+export async function deleteInkReturn(id: string): Promise<boolean> {
+  try {
+    const res = await fetch(`${PB_URL}/api/collections/ink_returns/records/${id}`, {
+      method: "DELETE",
+    })
+    return res.ok
+  } catch (e) {
+    console.error("Error deleting ink_return:", e)
+    return false
+  }
+}
+
 export async function getPrintCard(printCard: string) {
   try {
     const res = await fetch(
