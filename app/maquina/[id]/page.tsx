@@ -10,11 +10,15 @@ import { calcularTiempoMinutos, determinarUrgencia } from "@/lib/mock-data"
 import {
   getPrintCard, getTinta, calcularKgPorColor, calcularTiempoPorTinta, type KgPorColor,
   getInkReturns, createInkReturn, updateInkReturn, deleteInkReturn, type InkReturn,
+  getAniloxCatalogo, type AniloxCatalogo,
 } from "@/lib/pocketbase"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Progress } from "@/components/ui/progress"
+import {
+  Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
+} from "@/components/ui/select"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -218,6 +222,7 @@ export default function MaquinaPage() {
 
   const [velocidad, setVelocidad] = useState("")
   const [filas, setFilas] = useState<FilaColor[]>([])
+  const [aniloxCatalogo, setAniloxCatalogo] = useState<AniloxCatalogo[]>([])
   const [loadingPC, setLoadingPC] = useState(false)
   const [anchoCm, setAnchoCm] = useState(0)
   const [anchoInput, setAnchoInput] = useState("")
@@ -257,12 +262,14 @@ export default function MaquinaPage() {
       return
     }
 
-    const [pcData, inkReturnsList] = await Promise.all([
+    const [pcData, inkReturnsList, catalogoAnilox] = await Promise.all([
       getPrintCard(pc),
       getInkReturns(machineId),
+      getAniloxCatalogo(),
     ])
     if (requestId !== loadRequestRef.current) return
 
+    setAniloxCatalogo(catalogoAnilox)
     const inkReturnsMap = new Map(inkReturnsList.map(r => [r.pantone, r]))
     setInkReturns(inkReturnsMap)
 
@@ -282,9 +289,19 @@ export default function MaquinaPage() {
       const tinta = await getTinta(nombreLimpio)
       if (requestId !== loadRequestRef.current) return
 
-      const bcm = tinta?.bcm ?? 0
+      const bcmRaw = tinta?.bcm ?? 0
       const densidad = tinta?.densidad ?? 0
-      const anilox = tinta?.anilox ?? 0
+
+      let bcm = bcmRaw
+      let anilox = tinta?.anilox ?? 0
+      if (catalogoAnilox.length > 0 && bcmRaw > 0) {
+        const closest = catalogoAnilox.reduce((prev, curr) =>
+          Math.abs(curr.bcm - bcmRaw) < Math.abs(prev.bcm - bcmRaw) ? curr : prev
+        )
+        bcm = closest.bcm
+        anilox = closest.lpi
+      }
+
       const ret = inkReturnsMap.get(colorRow.pantone)
       const kgDisponibles = ret?.confirmado === true ? ret.kg_disponibles : 0
 
@@ -356,6 +373,20 @@ export default function MaquinaPage() {
       }
 
       nuevas[index] = fila
+      return nuevas
+    })
+  }
+
+  function seleccionarAnilox(index: number, lpi: number, bcm: number) {
+    setFilas(prev => {
+      const nuevas = [...prev]
+      const fila = { ...nuevas[index], anilox: lpi, bcm }
+      const kgEnMaq = parseFloat(fila.kgEnMaquina) || 0
+      const kgBase = KG_BASE_MAQUINA[maquinaNombre] || 0
+      const { kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
+        metrosRestantes, anchoCm, bcm, fila.densidad, fila.cobertura, kgBase, kgEnMaq
+      )
+      nuevas[index] = { ...fila, kgBruto, kgTinta, kgDisolvente }
       return nuevas
     })
   }
@@ -820,7 +851,6 @@ export default function MaquinaPage() {
                       <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">#</th>
                       <th className="px-4 py-2.5 text-left text-xs font-medium text-muted-foreground">Color</th>
                       <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Anilox</th>
-                      <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">BCM</th>
                       <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Densidad</th>
                       <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Cob. %</th>
                       <th className="px-4 py-2.5 text-right text-xs font-medium text-muted-foreground">Kg calc.</th>
@@ -852,26 +882,27 @@ export default function MaquinaPage() {
                           })()}
                         </td>
                         <td className="px-4 py-3 text-right">
-                          <Input
-                            type="number"
-                            value={fila.anilox || ""}
-                            onChange={e => actualizarFila(i, "anilox", e.target.value)}
-                            className="w-20 text-right font-mono text-xs h-7 ml-auto"
-                            placeholder="LPI"
-                          />
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <Input
-                            type="number"
-                            step="0.1"
-                            value={fila.bcm || ""}
-                            onChange={e => actualizarFila(i, "bcm", e.target.value)}
-                            className={cn(
-                              "w-20 text-right font-mono text-xs h-7 ml-auto",
+                          <Select
+                            value={fila.anilox > 0 ? String(fila.anilox) : ""}
+                            onValueChange={val => {
+                              const item = aniloxCatalogo.find(a => String(a.lpi) === val)
+                              if (item) seleccionarAnilox(i, item.lpi, item.bcm)
+                            }}
+                          >
+                            <SelectTrigger className={cn(
+                              "h-7 text-xs font-mono w-40 ml-auto",
                               !fila.bcm && "border-amber-400 dark:border-amber-600"
-                            )}
-                            placeholder="BCM"
-                          />
+                            )}>
+                              <SelectValue placeholder="Seleccionar anilox…" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {aniloxCatalogo.map(a => (
+                                <SelectItem key={a.lpi} value={String(a.lpi)} className="font-mono text-xs">
+                                  {a.lpi} LPI — BCM {a.bcm}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
                         </td>
                         <td className="px-4 py-3 text-right">
                           <Input

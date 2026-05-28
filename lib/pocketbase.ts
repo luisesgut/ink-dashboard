@@ -29,6 +29,28 @@ export interface CatalogoMaquina {
   nombre: string
 }
 
+export interface AniloxCatalogo {
+  lpi: number
+  bcm: number
+}
+
+export async function getAniloxCatalogo(): Promise<AniloxCatalogo[]> {
+  try {
+    const res = await fetch(
+      `${PB_URL}/api/collections/anilox/records?sort=lpi&perPage=200`
+    )
+    if (!res.ok) return []
+    const data = await res.json()
+    return (data.items ?? []).map((item: Record<string, unknown>) => ({
+      lpi: parseFloat(String(item.lpi ?? "0")) || 0,
+      bcm: parseFloat(String(item.bcm ?? "0")) || 0,
+    }))
+  } catch (e) {
+    console.error("Error fetching anilox catalog:", e)
+    return []
+  }
+}
+
 export const TRANSFERENCIA = 0.3
 export const DILUCION = 0.1
 
