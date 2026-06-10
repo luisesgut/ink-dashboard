@@ -4,7 +4,7 @@ import { useState, useEffect } from "react"
 import { SidebarTrigger } from "@/components/ui/sidebar"
 import { Separator } from "@/components/ui/separator"
 
-export function AppHeader() {
+export function AppHeader({ showSidebarTrigger = true }: { showSidebarTrigger?: boolean }) {
   const [dateStr, setDateStr] = useState("")
 
   useEffect(() => {
@@ -20,8 +20,12 @@ export function AppHeader() {
 
   return (
     <header className="sticky top-0 z-30 flex h-12 items-center gap-3 border-b bg-background/80 backdrop-blur-sm px-4">
-      <SidebarTrigger className="h-7 w-7 text-muted-foreground hover:text-foreground" />
-      <Separator orientation="vertical" className="h-4" />
+      {showSidebarTrigger && (
+        <>
+          <SidebarTrigger className="h-7 w-7 text-muted-foreground hover:text-foreground" />
+          <Separator orientation="vertical" className="h-4" />
+        </>
+      )}
       <span className="flex-1 text-xs text-muted-foreground font-mono capitalize hidden sm:block">
         {dateStr}
       </span>

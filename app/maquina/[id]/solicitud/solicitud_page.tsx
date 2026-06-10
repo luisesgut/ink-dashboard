@@ -8,7 +8,7 @@ import { useTableroHub } from "@/lib/tablero-hub"
 import { machineIdToPrensa, normalizePrensaCode, parseCantidadPorUnidad } from "@/lib/tablero-mappers"
 import type { CuerpoImpresor } from "@/lib/mock-data"
 import { calcularTiempoMinutos, determinarUrgencia } from "@/lib/mock-data"
-import { getPrintCard, getTinta, calcularKgPorColor, type KgPorColor } from "@/lib/pocketbase"
+import { getPrintCard, getTinta, calcularKgPorColor, getKgBaseMaquina, type KgPorColor } from "@/lib/pocketbase"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -65,6 +65,7 @@ export default function SolicitudPage() {
   const [coloresData, setColoresData] = useState<KgPorColor[]>([])
   const [anchoCm, setAnchoCm] = useState(impresora.trabajoActual?.anchoImpresion ? impresora.trabajoActual.anchoImpresion * 100 : 100)
   const [maquinaNombre, setMaquinaNombre] = useState("")
+  const [kgBaseMaquina, setKgBaseMaquina] = useState(0)
   const [pcError, setPcError] = useState("")
 
   if (!tableroActual) {
@@ -92,7 +93,8 @@ export default function SolicitudPage() {
 
     setAnchoCm(pc.ancho)
     setMaquinaNombre(pc.maquina)
-    const kgBase = KG_BASE_MAQUINA[pc.maquina] || 0
+    const kgBase = await getKgBaseMaquina(pc.maquina) ?? KG_BASE_MAQUINA[pc.maquina] ?? 0
+    setKgBaseMaquina(kgBase)
 
     // Para cada color, buscar sus datos de tinta
     const resultados: KgPorColor[] = []
@@ -109,6 +111,8 @@ export default function SolicitudPage() {
           bcm: 0,
           densidad: 0,
           cobertura,
+          kgConsumo: 0,
+          kgBase: 0,
           kgBruto: 0,
           kgTinta: 0,
           kgDisolvente: 0,
@@ -117,7 +121,7 @@ export default function SolicitudPage() {
         continue
       }
 
-      const { kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
+      const { kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
         metrosRestantes,
         pc.ancho,
         tinta.bcm,
@@ -132,6 +136,8 @@ export default function SolicitudPage() {
         bcm: tinta.bcm,
         densidad: tinta.densidad,
         cobertura,
+        kgConsumo,
+        kgBase: kgBaseCalculado,
         kgBruto,
         kgTinta,
         kgDisolvente,
@@ -146,16 +152,16 @@ export default function SolicitudPage() {
   // Recalcular cuando cambian los metros
   useEffect(() => {
     if (coloresData.length === 0 || anchoCm === 0) return
-    const kgBase = KG_BASE_MAQUINA[maquinaNombre] || 0
+    const kgBase = kgBaseMaquina || KG_BASE_MAQUINA[maquinaNombre] || 0
     const nuevos = coloresData.map(c => {
       if (c.bcm === 0) return c
-      const { kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
+      const { kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
         metrosRestantes, anchoCm, c.bcm, c.densidad, c.cobertura, kgBase
       )
-      return { ...c, kgBruto, kgTinta, kgDisolvente }
+      return { ...c, kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente }
     })
     setColoresData(nuevos)
-  }, [metrosRestantes])
+  }, [metrosRestantes, anchoCm, kgBaseMaquina, maquinaNombre])
 
   const totalKg = coloresData.reduce((s, c) => s + c.kgTinta, 0)
   const tiempoMin = calcularTiempoMinutos(metrosRestantes, velocidadActual)
@@ -306,8 +312,15 @@ export default function SolicitudPage() {
                           <td className="py-2 text-right">{(c.cobertura * 100).toFixed(1)}%</td>
                           <td className="py-2 text-right">{c.anilox || "ND"}</td>
                           <td className="py-2 text-right">{c.bcm || "ND"}</td>
-                          <td className="py-2 text-right font-mono font-bold text-foreground">
-                            {c.kgTinta > 0 ? `${c.kgTinta} kg` : "-"}
+                          <td className="py-2 text-right">
+                            {c.kgTinta > 0 ? (
+                              <div className="flex flex-col items-end">
+                                <span className="font-mono font-bold text-foreground">{c.kgTinta} kg</span>
+                                <span className="text-[10px] text-muted-foreground">
+                                  consumo {c.kgConsumo} + base {c.kgBase}
+                                </span>
+                              </div>
+                            ) : "-"}
                           </td>
                           <td className="py-2 text-right font-mono text-muted-foreground">
                             {c.kgDisolvente > 0 ? `${c.kgDisolvente} kg` : "-"}

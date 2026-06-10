@@ -17,6 +17,10 @@ function pbToSolicitud(r: Record<string, unknown>): SolicitudTinta {
     timestamp: new Date(r.created as string),
     impresoraId: r.impresora_id as string,
     impresoraNombre: r.impresora_nombre as string,
+    ordenProduccion: r.orden_produccion as string | undefined,
+    printCard: r.print_card as string | undefined,
+    metrosCalculo: parseFloat(String(r.metros_calculo ?? "0")) || undefined,
+    runKey: r.run_key as string | undefined,
     cuerpoNumero: r.cuerpo_numero as number,
     color: r.color as string,
     serieTinta: r.serie_tinta as string,
@@ -31,7 +35,7 @@ function pbToSolicitud(r: Record<string, unknown>): SolicitudTinta {
     kgAFabricar: r.kg_a_fabricar as number,
     tiempoEstimadoMin: r.tiempo_estimado_min as number,
     urgencia: r.urgencia as "rojo" | "naranja" | "verde",
-    estado: r.estado as "pendiente" | "fabricando" | "fabricado" | "entregado",
+    estado: r.estado as "pendiente" | "fabricando" | "fabricado" | "entregado" | "depositado",
     kgFabricados: r.kg_fabricados as number | undefined,
     timestampFabricando: r.timestamp_fabricando ? new Date(r.timestamp_fabricando as string) : undefined,
     timestampFabricado: r.timestamp_fabricado ? new Date(r.timestamp_fabricado as string) : undefined,
@@ -43,6 +47,10 @@ function solicitudToPb(sol: Omit<SolicitudTinta, "id" | "timestamp" | "estado">)
   return {
     impresora_id: sol.impresoraId,
     impresora_nombre: sol.impresoraNombre,
+    orden_produccion: sol.ordenProduccion ?? "",
+    print_card: sol.printCard ?? "",
+    metros_calculo: sol.metrosCalculo ?? 0,
+    run_key: sol.runKey ?? "",
     cuerpo_numero: sol.cuerpoNumero,
     color: sol.color,
     serie_tinta: sol.serieTinta,
@@ -72,6 +80,7 @@ interface InkStore {
   marcarFabricando: (solId: string) => Promise<void>
   marcarFabricado: (solId: string, kgReales: number) => Promise<void>
   confirmarRecepcion: (solId: string) => Promise<void>
+  confirmarDeposito: (solId: string) => Promise<void>
   marcarNotificacionLeida: (notId: string) => void
   marcarTodasLeidas: () => void
   getSolicitudesPorMaquina: (maquinaId: string) => SolicitudTinta[]
@@ -95,7 +104,7 @@ export function InkProvider({ children }: { children: ReactNode }) {
   const fetchSolicitudes = useCallback(async () => {
     try {
       const res = await fetch(
-        `${PB_URL}/api/collections/solicitudes/records?sort=-created&filter=(estado!='entregado')&perPage=100`
+        `${PB_URL}/api/collections/solicitudes/records?sort=-created&filter=(estado!='depositado')&perPage=100`
       )
       if (!res.ok) return
       const data = await res.json()
@@ -240,6 +249,22 @@ export function InkProvider({ children }: { children: ReactNode }) {
     }
   }, [solicitudes, fetchSolicitudes])
 
+  const confirmarDeposito = useCallback(async (solId: string) => {
+    try {
+      await fetch(`${PB_URL}/api/collections/solicitudes/records/${solId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          estado: "depositado",
+          timestamp_depositado: new Date().toISOString(),
+        }),
+      })
+      await fetchSolicitudes()
+    } catch (e) {
+      console.error("Error:", e)
+    }
+  }, [fetchSolicitudes])
+
   const marcarNotificacionLeida = useCallback((notId: string) => {
     setNotificaciones(prev => prev.map(n => n.id === notId ? { ...n, leida: true } : n))
   }, [])
@@ -275,6 +300,7 @@ export function InkProvider({ children }: { children: ReactNode }) {
       marcarFabricando,
       marcarFabricado,
       confirmarRecepcion,
+      confirmarDeposito,
       marcarNotificacionLeida,
       marcarTodasLeidas,
       getSolicitudesPorMaquina,

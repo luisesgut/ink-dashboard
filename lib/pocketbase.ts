@@ -8,6 +8,7 @@ export interface TintaData {
   anilox: number
   bcm: number
   densidad: number
+  cobertura: number
   precio: number
 }
 
@@ -17,7 +18,9 @@ export interface KgPorColor {
   bcm: number
   densidad: number
   cobertura: number
-  kgBruto: number    // ← agregar
+  kgConsumo: number
+  kgBase: number
+  kgBruto: number
   kgTinta: number
   kgDisolvente: number
   anilox: number
@@ -27,11 +30,21 @@ export interface CatalogoMaquina {
   id: string
   codigo: string
   nombre: string
+  kgBase?: number
 }
 
 export interface AniloxCatalogo {
   lpi: number
   bcm: number
+}
+
+interface PrintCardData {
+  print_card: string
+  producto: string
+  ancho: number
+  maquina: string
+  colores: string[]
+  coberturas: number[]
 }
 
 export async function getAniloxCatalogo(): Promise<AniloxCatalogo[]> {
@@ -54,11 +67,55 @@ export async function getAniloxCatalogo(): Promise<AniloxCatalogo[]> {
 export const TRANSFERENCIA = 0.3
 export const DILUCION = 0.1
 
+export function normalizarCobertura(value: unknown): number {
+  const cobertura = parseFloat(String(value ?? "0")) || 0
+  return cobertura > 1 ? cobertura / 100 : cobertura
+}
+
+function getCoberturaFromRecord(item: Record<string, unknown>): number {
+  return normalizarCobertura(
+    item.cobertura ??
+    item.porcentaje_cobertura ??
+    item.porcentajeCobertura ??
+    item.superficie_porcentaje ??
+    item.superficiePorcentaje ??
+    item.porcentaje ??
+    item.coverage
+  )
+}
+
 // Quita el prefijo "PANTONE " y espacios extra
 function limpiarNombrePantone(nombre: string): string {
   return nombre
     .replace(/^PANTONE\s+/i, "")
     .trim()
+}
+
+function normalizarNombreBusquedaPantone(nombre: string): string {
+  return limpiarNombrePantone(nombre)
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+function normalizarPantoneComparable(nombre: string): string {
+  return limpiarNombrePantone(nombre)
+    .replace(/\bCIAN\b/gi, "CYAN")
+    .replace(/\s+/g, "")
+    .toUpperCase()
+}
+
+function escapePocketBaseString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'")
+}
+
+function buildTintaFilter(terminos: string[]): string {
+  const filtros = terminos
+    .map((termino) => {
+      const value = escapePocketBaseString(termino)
+      return `(pantone~'${value}'||tinta~'${value}')`
+    })
+    .join("||")
+  return encodeURIComponent(`(${filtros})`)
 }
 
 // Jala colores del endpoint .NET (fuente de verdad)
@@ -76,22 +133,31 @@ async function getColoresDesdeAPI(printCard: string): Promise<{ pantone: string,
 // Busca BCM, anilox y densidad en PocketBase por nombre de Pantone
 export async function getTinta(nombre: string): Promise<TintaData | null> {
   try {
-    const limpio = limpiarNombrePantone(nombre)
-    const encoded = encodeURIComponent(limpio)
+    const limpio = normalizarNombreBusquedaPantone(nombre)
+    const original = nombre.trim().replace(/\s+/g, " ")
+    const compacto = limpio.replace(/\s+/g, "")
+    const terminos = [...new Set([limpio, original, compacto].filter(Boolean))]
     // ~ es LIKE case-insensitive en PocketBase
     const res = await fetch(
-      `${PB_URL}/api/collections/tintas/records?filter=(pantone~'${encoded}'||tinta~'${encoded}')&perPage=1`
+      `${PB_URL}/api/collections/tintas/records?filter=${buildTintaFilter(terminos)}&perPage=10`
     )
     if (!res.ok) return null
     const data = await res.json()
     if (!data.items?.length) return null
 
-    const item = data.items[0]
+    const nombreNormalizado = normalizarPantoneComparable(nombre)
+    const item = (data.items as Record<string, unknown>[]).find((record) => {
+      const pantone = normalizarPantoneComparable(String(record.pantone ?? ""))
+      const tinta = normalizarPantoneComparable(String(record.tinta ?? ""))
+      return pantone === nombreNormalizado || tinta === nombreNormalizado
+    }) ?? data.items[0]
+
     return {
       ...item,
       anilox: parseFloat(item.anilox) || 0,
       bcm: parseFloat(item.bcm) || 0,
-      densidad: parseFloat(item.densidad) || 0,
+      densidad: parseFloat(item.densidad) || 0.9,
+      cobertura: getCoberturaFromRecord(item),
       precio: parseFloat(item.precio) || 0,
     } as TintaData
   } catch (e) {
@@ -107,21 +173,23 @@ export async function getPrintCardHibrido(
   anchoCm: number,
   kgBase: number
 ): Promise<KgPorColor[]> {
-  const coloresAPI = await getColoresDesdeAPI(printCard)
+  const [coloresAPI, printCardPB] = await Promise.all([
+    getColoresDesdeAPI(printCard),
+    getPrintCard(printCard),
+  ])
   if (!coloresAPI.length) return []
 
   const resultados: KgPorColor[] = []
 
   for (const colorRow of coloresAPI) {
     if (!colorRow.pantone) continue
-    const cobertura = (colorRow.cobertura || 0) / 100  // viene en % , convertir a decimal
-
     const tinta = await getTinta(colorRow.pantone)
+    const cobertura = normalizarCobertura(colorRow.cobertura) || getCoberturaPrintCardColor(printCardPB, colorRow.pantone) || tinta?.cobertura || 0
     const bcm = tinta?.bcm ?? 0
-    const densidad = tinta?.densidad ?? 0
+    const densidad = tinta?.densidad ?? 0.9
     const anilox = tinta?.anilox ?? 0
 
-    const { kgTinta, kgDisolvente } = calcularKgPorColor(
+    const { kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
       metros, anchoCm, bcm, densidad, cobertura, kgBase
     )
 
@@ -131,7 +199,9 @@ export async function getPrintCardHibrido(
       bcm,
       densidad,
       cobertura,
-      kgBruto: kgTinta,  // ← agregar esto
+      kgConsumo,
+      kgBase: kgBaseCalculado,
+      kgBruto,
       kgTinta,
       kgDisolvente,
       anilox,
@@ -149,16 +219,21 @@ export function calcularKgPorColor(
   cobertura: number,
   kgBase: number = 0,
   kgEnMaquina: number = 0
-): { kgBruto: number; kgTinta: number; kgDisolvente: number } {
-  if (!bcm || !densidad || !anchoCm) return { kgBruto: 0, kgTinta: 0, kgDisolvente: 0 }
+): { kgConsumo: number; kgBase: number; kgBruto: number; kgTinta: number; kgDisolvente: number } {
+  if (!bcm || !densidad || !anchoCm) {
+    return { kgConsumo: 0, kgBase: 0, kgBruto: 0, kgTinta: 0, kgDisolvente: 0 }
+  }
   const m2 = metros * anchoCm / 100
   const pctTinta = 1 / (1 + DILUCION)
   const pctDisolvente = DILUCION / (1 + DILUCION)
   const base = (m2 * bcm * densidad / 1000) * cobertura * TRANSFERENCIA
-  const kgBruto = Math.round((base * pctTinta + kgBase) * 100) / 100  // ← sin restar kgEnMaquina
-  const kgTinta = Math.max(0, kgBruto - kgEnMaquina)                   // ← lo que hay que pedir
+  const kgConsumo = Math.round(base * pctTinta * 100) / 100
+  const kgBruto = Math.round((kgConsumo + kgBase) * 100) / 100
+  const kgTinta = Math.max(0, kgBruto - kgEnMaquina)
   const kgDisolvente = base * pctDisolvente
   return {
+    kgConsumo: Math.round(kgConsumo * 100) / 100,
+    kgBase: Math.round(kgBase * 100) / 100,
     kgBruto: Math.round(kgBruto * 100) / 100,
     kgTinta: Math.round(kgTinta * 100) / 100,
     kgDisolvente: Math.round(kgDisolvente * 100) / 100,
@@ -312,7 +387,37 @@ export async function deleteInkReturn(id: string): Promise<boolean> {
   }
 }
 
-export async function getPrintCard(printCard: string) {
+function getCoberturaPrintCardColor(pc: PrintCardData | null, pantone: string): number {
+  if (!pc) return 0
+
+  const target = normalizarPantoneComparable(pantone)
+  const index = pc.colores.findIndex((color) => normalizarPantoneComparable(color) === target)
+  return index >= 0 ? pc.coberturas[index] ?? 0 : 0
+}
+
+function parsePrintCardRecord(r: Record<string, unknown>): PrintCardData {
+  const colores: string[] = []
+  const coberturas: number[] = []
+
+  for (let i = 1; i <= 10; i += 1) {
+    const color = String(r[`color_${i}`] ?? "").trim()
+    const cobertura = normalizarCobertura(r[`cob_${i}`])
+    if (!color || !cobertura) continue
+    colores.push(color)
+    coberturas.push(cobertura)
+  }
+
+  return {
+    print_card: String(r.print_card ?? ""),
+    producto: String(r.producto ?? ""),
+    ancho: parseFloat(String(r.ancho ?? "0")) || 0,
+    maquina: String(r.maquina ?? ""),
+    colores,
+    coberturas,
+  }
+}
+
+export async function getPrintCard(printCard: string): Promise<PrintCardData | null> {
   try {
     const res = await fetch(
       `${PB_URL}/api/collections/print_cards/records?filter=(print_card='${encodeURIComponent(printCard)}')&perPage=1`
@@ -320,15 +425,7 @@ export async function getPrintCard(printCard: string) {
     if (!res.ok) return null
     const data = await res.json()
     if (!data.items?.length) return null
-    const r = data.items[0]
-    return {
-      print_card: r.print_card,
-      producto: r.producto,
-      ancho: parseFloat(r.ancho) || 0,
-      maquina: r.maquina || "",
-      colores: [] as string[],
-      coberturas: [] as number[],
-    }
+    return parsePrintCardRecord(data.items[0])
   } catch (e) {
     console.error("Error fetching print card:", e)
     return null
@@ -336,9 +433,40 @@ export async function getPrintCard(printCard: string) {
 }
 
 function normalizarCodigoMaquina(value: string): string | null {
-  const match = value.match(/\bI?(\d{1,2})\b/i)
+  const match = value.match(/(?:^|[^0-9])I?(\d{1,2})(?:$|[^0-9])/i) ?? value.match(/(\d{1,2})$/)
   if (!match?.[1]) return null
   return match[1].padStart(2, "0")
+}
+
+function parseKgBaseMaquina(item: Record<string, unknown>): number | null {
+  const value = item.kg_base ?? item.kgBase ?? item.kgbase ?? item.base_kg
+  const kgBase = parseFloat(String(value ?? ""))
+  return Number.isFinite(kgBase) ? kgBase : null
+}
+
+export async function getKgBaseMaquina(maquinaNombre: string): Promise<number | null> {
+  try {
+    const nombre = maquinaNombre.trim()
+    const codigo = normalizarCodigoMaquina(nombre)
+    if (!nombre && !codigo) return null
+
+    const res = await fetch(`${PB_URL}/api/collections/maquinas/records?perPage=500`)
+    if (!res.ok) return null
+
+    const data = await res.json()
+    const item = (data.items ?? []).find((record: Record<string, unknown>) => {
+      const recordCodigo = normalizarCodigoMaquina(String(record.codigo ?? record.nombre ?? record.maquina ?? ""))
+      if (codigo && recordCodigo === codigo) return true
+
+      const nombreRecord = String(record.nombre ?? record.maquina ?? "").trim().toLowerCase()
+      return !!nombre && nombreRecord === nombre.toLowerCase()
+    }) as Record<string, unknown> | undefined
+
+    return item ? parseKgBaseMaquina(item) : null
+  } catch (e) {
+    console.error("Error fetching kg base de maquina:", e)
+    return null
+  }
 }
 
 export async function getMaquinasCatalogo(): Promise<CatalogoMaquina[]> {
@@ -349,9 +477,7 @@ export async function getMaquinasCatalogo(): Promise<CatalogoMaquina[]> {
     const maquinas = new Map<string, CatalogoMaquina>()
 
     while (page <= totalPages) {
-      const res = await fetch(
-        `${PB_URL}/api/collections/print_cards/records?fields=maquina&perPage=${perPage}&page=${page}`
-      )
+      const res = await fetch(`${PB_URL}/api/collections/maquinas/records?perPage=${perPage}&page=${page}`)
 
       if (!res.ok) return []
 
@@ -359,7 +485,7 @@ export async function getMaquinasCatalogo(): Promise<CatalogoMaquina[]> {
       totalPages = Number(data.totalPages ?? 1)
 
       for (const item of data.items ?? []) {
-        const nombre = String(item.maquina ?? "").trim()
+        const nombre = String(item.nombre ?? item.maquina ?? "").trim()
         const codigo = normalizarCodigoMaquina(nombre)
         if (!nombre || !codigo || maquinas.has(codigo)) continue
 
@@ -367,6 +493,7 @@ export async function getMaquinasCatalogo(): Promise<CatalogoMaquina[]> {
           id: `bobst-${codigo}`,
           codigo,
           nombre: `Prensa ${codigo}`,
+          kgBase: parseKgBaseMaquina(item) ?? undefined,
         })
       }
 

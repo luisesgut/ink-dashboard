@@ -46,8 +46,8 @@ export function tintasToImpresoras(rows: TintasDTO[]): Impresora[] {
   return Object.entries(grouped)
     .map(([prensa, trabajos]) => {
       const row = trabajos[0]
-      const metrosTotales = parseCantidadPorUnidad(row.cantidadSolicitada, "MTR") ?? 0
-      const metrosRestantes = parseCantidadPorUnidad(row.cantidadFaltante, "MTR") ?? 0
+      const metrosTotales = row.metrosSolicitados
+      const metrosRestantes = row.metrosFaltantes
       const porcentaje = Number.isFinite(row.porcentaje) ? row.porcentaje : 0
 
       const trabajoActual: TrabajoActual = {

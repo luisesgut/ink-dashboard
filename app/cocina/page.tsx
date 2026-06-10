@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useRef, useState, type ElementType } from "react"
 import { useInkStore } from "@/lib/store"
 import type { SolicitudTinta } from "@/lib/mock-data"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
@@ -10,6 +10,9 @@ import { Label } from "@/components/ui/label"
 import { Badge } from "@/components/ui/badge"
 import { UrgencyBadge } from "@/components/urgency-badge"
 import { StatusBadge } from "@/components/status-badge"
+import { CocinaNav } from "@/components/cocina-nav"
+import { cn } from "@/lib/utils"
+import { getLiveDeadline, type LiveDeadlineTone } from "@/lib/live-deadline"
 import {
   Dialog,
   DialogContent,
@@ -17,17 +20,105 @@ import {
   DialogTitle,
   DialogFooter,
 } from "@/components/ui/dialog"
-import { FlaskConical, PlayCircle, CheckCircle2, Clock, Droplets } from "lucide-react"
+import {
+  Activity,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Droplets,
+  FlaskConical,
+  Gauge,
+  Layers,
+  PlayCircle,
+  Timer,
+} from "lucide-react"
 import { toast } from "sonner"
 
 const urgenciaOrden = { rojo: 0, naranja: 1, verde: 2 }
-const estadoOrden = { pendiente: 0, fabricando: 1, fabricado: 2, entregado: 3 }
+const estadoOrden = { pendiente: 0, fabricando: 1, fabricado: 2, entregado: 3, depositado: 4 }
+
+function formatNumber(value: number | undefined, decimals = 0) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "--"
+  return value.toLocaleString("es-MX", {
+    maximumFractionDigits: decimals,
+    minimumFractionDigits: 0,
+  })
+}
+
+function formatKg(value: number | undefined) {
+  if (typeof value !== "number" || Number.isNaN(value)) return "--"
+  return `${formatNumber(value, 1)} kg`
+}
+
+function TechPill({
+  icon: Icon,
+  label,
+  value,
+  tone = "default",
+}: {
+  icon: ElementType
+  label: string
+  value: string
+  tone?: "default" | "amber" | "emerald"
+}) {
+  return (
+    <div
+      className={cn(
+        "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs",
+        tone === "amber"
+          ? "border-amber-300 bg-amber-50 text-amber-800"
+          : tone === "emerald"
+          ? "border-emerald-300 bg-emerald-50 text-emerald-800"
+          : "border-border bg-background text-muted-foreground"
+      )}
+    >
+      <Icon className="h-3.5 w-3.5" />
+      <span className="text-[10px] uppercase tracking-wide">{label}</span>
+      <span className="font-mono font-semibold text-foreground">{value}</span>
+    </div>
+  )
+}
+
+function DetailMetric({
+  label,
+  value,
+  hint,
+}: {
+  label: string
+  value: string
+  hint?: string
+}) {
+  return (
+    <div className="rounded-md border bg-background px-3 py-2">
+      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="mt-0.5 font-mono text-sm font-semibold text-foreground">{value}</p>
+      {hint && <p className="mt-0.5 text-[10px] text-muted-foreground">{hint}</p>}
+    </div>
+  )
+}
+
+function deadlineClass(tone: LiveDeadlineTone) {
+  switch (tone) {
+    case "expired":
+      return "border-red-500 bg-red-600 text-white"
+    case "red":
+      return "border-red-300 bg-red-50 text-red-700"
+    case "amber":
+      return "border-amber-300 bg-amber-50 text-amber-800"
+    case "green":
+      return "border-emerald-300 bg-emerald-50 text-emerald-800"
+    default:
+      return "border-border bg-background text-muted-foreground"
+  }
+}
 
 export default function CocinaPage() {
   const { solicitudes, marcarFabricando, marcarFabricado } = useInkStore()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [selectedSolicitud, setSelectedSolicitud] = useState<SolicitudTinta | null>(null)
   const [kgFabricados, setKgFabricados] = useState("")
+  const [expandedSolicitudId, setExpandedSolicitudId] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
   const pendingIdsRef = useRef<Set<string>>(new Set())
   const isPendingTrackerReadyRef = useRef(false)
   const audioContextRef = useRef<AudioContext | null>(null)
@@ -85,6 +176,11 @@ export default function CocinaPage() {
   }, [solicitudes])
 
   useEffect(() => {
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [])
+
+  useEffect(() => {
     return () => {
       audioContextRef.current?.close().catch(() => {})
       audioContextRef.current = null
@@ -94,9 +190,18 @@ export default function CocinaPage() {
   const solicitudesActivas = [...solicitudes]
     .filter((s) => s.estado !== "entregado")
     .sort(
-      (a, b) =>
-        estadoOrden[a.estado] - estadoOrden[b.estado] ||
-        urgenciaOrden[a.urgencia] - urgenciaOrden[b.urgencia]
+      (a, b) => {
+        const estadoDiff = estadoOrden[a.estado] - estadoOrden[b.estado]
+        if (estadoDiff !== 0) return estadoDiff
+
+        if (a.estado === "pendiente" || a.estado === "fabricando") {
+          const deadlineA = getLiveDeadline(a.timestamp, a.tiempoEstimadoMin, nowMs)
+          const deadlineB = getLiveDeadline(b.timestamp, b.tiempoEstimadoMin, nowMs)
+          if (deadlineA.sortValue !== deadlineB.sortValue) return deadlineA.sortValue - deadlineB.sortValue
+        }
+
+        return urgenciaOrden[a.urgencia] - urgenciaOrden[b.urgencia]
+      }
     )
 
   const pendientes = solicitudes.filter((s) => s.estado === "pendiente").length
@@ -127,6 +232,8 @@ export default function CocinaPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <CocinaNav />
+
       <div>
         <h2 className="text-2xl font-bold text-foreground">
           Cocina de Tintas
@@ -184,77 +291,97 @@ export default function CocinaPage() {
         </Card>
       ) : (
         <div className="flex flex-col gap-3">
-          {solicitudesActivas.map((sol) => (
+          {solicitudesActivas.map((sol) => {
+            const deadline = getLiveDeadline(sol.timestamp, sol.tiempoEstimadoMin, nowMs)
+
+            return (
             <Card
               key={sol.id}
-              className={
-                sol.urgencia === "rojo" && sol.estado === "pendiente"
+              className={cn(
+                "overflow-hidden shadow-sm",
+                deadline.isExpired && sol.estado === "pendiente"
+                  ? "border-red-600 bg-red-50/80"
+                  : sol.urgencia === "rojo" && sol.estado === "pendiente"
                   ? "border-urgency-red/50 bg-red-50/50"
                   : sol.urgencia === "naranja" && sol.estado === "pendiente"
                   ? "border-urgency-orange/40 bg-orange-50/30"
                   : sol.estado === "fabricado"
                   ? "border-emerald-300/50 bg-emerald-50/30"
                   : ""
-              }
+              )}
             >
-              <CardContent className="p-4">
-                <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-                  {/* Info */}
-                  <div className="flex items-center gap-3 min-w-48">
-                    <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-muted">
+              <CardContent className="p-0">
+                <div className="grid gap-4 p-4 lg:grid-cols-[minmax(260px,1.4fr)_minmax(420px,2fr)_auto] lg:items-center">
+                  <div className="flex min-w-0 items-start gap-3">
+                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-background ring-1 ring-border">
                       <Droplets className="h-5 w-5 text-muted-foreground" />
                     </div>
-                    <div>
-                      <p className="text-sm font-bold text-foreground">
-                        {sol.id}
-                      </p>
-                      <p className="text-xs text-muted-foreground">
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-mono text-sm font-bold text-foreground">{sol.id}</p>
+                        <StatusBadge estado={sol.estado} />
+                      </div>
+                      <p className="mt-1 truncate text-sm font-semibold text-foreground">{sol.color}</p>
+                      <p className="truncate text-xs text-muted-foreground">{sol.serieTinta}</p>
+                      <p className="mt-1 text-xs text-muted-foreground">
                         {sol.impresoraNombre} - Cuerpo {sol.cuerpoNumero}
                       </p>
                     </div>
                   </div>
 
-                  {/* Color */}
-                  <div className="min-w-28">
-                    <p className="text-[10px] uppercase text-muted-foreground">Color</p>
-                    <p className="text-sm font-semibold text-foreground">{sol.color}</p>
-                    <p className="text-[10px] text-muted-foreground">{sol.serieTinta}</p>
-                  </div>
-
-                  {/* Kg */}
-                  <div className="min-w-20">
-                    <p className="text-[10px] uppercase text-muted-foreground">Kg a Fabricar</p>
-                    <p className="text-lg font-bold font-mono text-foreground">{sol.kgAFabricar}</p>
-                  </div>
-
-                  {/* Tiempo */}
-                  <div className="min-w-24">
-                    <p className="text-[10px] uppercase text-muted-foreground">Tiempo</p>
-                    <p className="text-lg font-bold font-mono text-foreground">
-                      {sol.tiempoEstimadoMin === 999 ? "--" : `${sol.tiempoEstimadoMin}min`}
-                    </p>
-                  </div>
-
-                  {/* Urgencia */}
-                  <UrgencyBadge
-                    urgencia={sol.urgencia}
-                    tiempoMin={sol.tiempoEstimadoMin === 999 ? undefined : sol.tiempoEstimadoMin}
-                    pulsing={sol.estado === "pendiente"}
-                  />
-
-                  {/* Estado */}
-                  <StatusBadge estado={sol.estado} />
-
-                  {/* Kg fabricados (solo si fabricado) */}
-                  {sol.estado === "fabricado" && sol.kgFabricados !== undefined && (
-                    <div className="min-w-20">
-                      <p className="text-[10px] uppercase text-muted-foreground">Kg Fabricados</p>
-                      <p className="text-lg font-bold font-mono text-emerald-600">{sol.kgFabricados}</p>
+                  <div className="grid gap-3 sm:grid-cols-[140px_140px_1fr] sm:items-center">
+                    <div className="rounded-md border bg-background px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Kg a fabricar</p>
+                      <p className="font-mono text-2xl font-bold leading-none text-foreground">{formatKg(sol.kgAFabricar)}</p>
                     </div>
-                  )}
+                    <div className="rounded-md border bg-background px-3 py-2">
+                      <p className={cn(
+                        "text-[10px] uppercase tracking-wide",
+                        deadline.tone === "expired" ? "text-red-600" : "text-muted-foreground"
+                      )}>
+                        {deadline.label}
+                      </p>
+                      <p className={cn(
+                        "font-mono text-2xl font-bold leading-none",
+                        deadline.tone === "expired" ? "text-red-600" : "text-foreground"
+                      )}>
+                        {deadline.value}
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <div className={cn(
+                        "inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-xs font-semibold",
+                        deadlineClass(deadline.tone)
+                      )}>
+                        <Timer className="h-3.5 w-3.5" />
+                        <span>{deadline.isExpired ? "Vencida" : "Cuenta viva"}</span>
+                      </div>
+                      <UrgencyBadge
+                        urgencia={sol.urgencia}
+                        pulsing={sol.estado === "pendiente"}
+                      />
+                      <TechPill icon={Gauge} label="BCM" value={formatNumber(sol.aniloxVolumen, 2)} />
+                      <TechPill icon={Layers} label="Anilox" value={sol.aniloxLineatura ? `${sol.aniloxLineatura}` : "--"} />
+                      <TechPill icon={Activity} label="Cob." value={`${formatNumber(sol.superficiePorcentaje, 1)}%`} />
+                      <TechPill icon={FlaskConical} label="Visc." value={sol.viscosidadActual ? `${sol.viscosidadActual}s` : "--"} tone="amber" />
+                    </div>
+                  </div>
 
-                  {/* Actions */}
-                  <div className="ml-auto flex items-center gap-2">
+                  <div className="flex flex-wrap items-center justify-start gap-2 lg:justify-end">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-8 px-2 text-xs"
+                      onClick={() => setExpandedSolicitudId(expandedSolicitudId === sol.id ? null : sol.id)}
+                    >
+                      Detalle
+                      <ChevronDown
+                        className={cn(
+                          "h-3.5 w-3.5 transition-transform",
+                          expandedSolicitudId === sol.id && "rotate-180"
+                        )}
+                      />
+                    </Button>
                     {sol.estado === "pendiente" && (
                       <Button
                         size="sm"
@@ -283,35 +410,85 @@ export default function CocinaPage() {
                     )}
                   </div>
                 </div>
+
+                {expandedSolicitudId === sol.id && (
+                  <div className="border-t bg-muted/20 p-4">
+                    <div className="grid gap-4 lg:grid-cols-[1.2fr_1fr]">
+                      <div>
+                        <div className="mb-2 flex items-center gap-2">
+                          <Gauge className="h-4 w-4 text-muted-foreground" />
+                          <h3 className="text-sm font-semibold text-foreground">Detalle tecnico</h3>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                          <DetailMetric label="BCM" value={formatNumber(sol.aniloxVolumen, 2)} />
+                          <DetailMetric label="Anilox" value={sol.aniloxLineatura ? `${sol.aniloxLineatura} LPI` : "--"} />
+                          <DetailMetric label="Cobertura" value={`${formatNumber(sol.superficiePorcentaje, 1)}%`} />
+                          <DetailMetric label="Viscosidad en maquina" value={sol.viscosidadActual ? `${sol.viscosidadActual} s` : "--"} hint="Dato reportado por prensa" />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="mb-2 flex items-center gap-2">
+                          <Timer className="h-4 w-4 text-muted-foreground" />
+                          <h3 className="text-sm font-semibold text-foreground">Produccion</h3>
+                        </div>
+                        <div className="grid gap-2 sm:grid-cols-2">
+                          <DetailMetric label="Metros restantes" value={`${formatNumber(sol.metrosRestantes)} m`} />
+                          <DetailMetric label="Ancho impresion" value={`${formatNumber(sol.anchoImpresion * 100, 1)} cm`} />
+                          <DetailMetric label="Velocidad" value={sol.velocidadActual ? `${formatNumber(sol.velocidadActual)} m/min` : "--"} />
+                          <DetailMetric label="Kg en maquina" value={formatKg(sol.kgEnMaquina)} />
+                        </div>
+                      </div>
+                    </div>
+
+                    {sol.estado === "fabricado" && sol.kgFabricados !== undefined && (
+                      <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-emerald-300 bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+                        <CheckCircle2 className="h-4 w-4" />
+                        <span>Fabricado real:</span>
+                        <span className="font-mono font-bold">{formatKg(sol.kgFabricados)}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
               </CardContent>
             </Card>
-          ))}
+            )
+          })}
         </div>
       )}
 
       {/* Dialog para ingresar Kg fabricados */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-        <DialogContent>
+        <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-foreground">Confirmar Fabricacion</DialogTitle>
           </DialogHeader>
           {selectedSolicitud && (
             <div className="flex flex-col gap-4 py-2">
-              <div className="rounded-lg bg-muted p-3">
-                <p className="text-sm text-foreground">
-                  <span className="font-semibold">{selectedSolicitud.id}</span> -{" "}
-                  {selectedSolicitud.color}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {selectedSolicitud.impresoraNombre} - Cuerpo{" "}
-                  {selectedSolicitud.cuerpoNumero}
-                </p>
-                <p className="mt-1 text-xs text-muted-foreground">
-                  Kg solicitados:{" "}
-                  <span className="font-mono font-bold text-foreground">
-                    {selectedSolicitud.kgAFabricar}
-                  </span>
-                </p>
+              <div className="rounded-lg border bg-muted/30 p-3">
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="font-mono text-sm font-semibold text-foreground">{selectedSolicitud.id}</p>
+                    <p className="mt-1 text-sm font-semibold text-foreground">{selectedSolicitud.color}</p>
+                    <p className="text-xs text-muted-foreground">{selectedSolicitud.serieTinta}</p>
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {selectedSolicitud.impresoraNombre} - Cuerpo {selectedSolicitud.cuerpoNumero}
+                    </p>
+                  </div>
+                  <div className="rounded-md border bg-background px-3 py-2 text-right">
+                    <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Solicitado</p>
+                    <p className="font-mono text-xl font-bold leading-none text-foreground">
+                      {formatKg(selectedSolicitud.kgAFabricar)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <TechPill icon={Gauge} label="BCM" value={formatNumber(selectedSolicitud.aniloxVolumen, 2)} />
+                  <TechPill icon={Layers} label="Anilox" value={selectedSolicitud.aniloxLineatura ? `${selectedSolicitud.aniloxLineatura}` : "--"} />
+                  <TechPill icon={Activity} label="Cob." value={`${formatNumber(selectedSolicitud.superficiePorcentaje, 1)}%`} />
+                  <TechPill icon={FlaskConical} label="Visc." value={selectedSolicitud.viscosidadActual ? `${selectedSolicitud.viscosidadActual}s` : "--"} tone="amber" />
+                </div>
               </div>
               <div className="flex flex-col gap-2">
                 <Label htmlFor="kgFabricados">

@@ -10,6 +10,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
+import { CocinaNav } from "@/components/cocina-nav"
 import { CheckCircle2, Clock, LoaderCircle, PackageCheck, Undo2 } from "lucide-react"
 import { toast } from "sonner"
 
@@ -77,6 +78,8 @@ export default function DevolucionesPage() {
 
   return (
     <div className="flex flex-col gap-6">
+      <CocinaNav />
+
       <div>
         <h2 className="text-2xl font-bold text-foreground">Devoluciones de Tinta</h2>
         <p className="text-sm text-muted-foreground">

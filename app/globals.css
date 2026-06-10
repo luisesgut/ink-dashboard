@@ -32,6 +32,8 @@ body {
 
 @layer base {
   :root {
+    --font-inter: Arial, Helvetica, sans-serif;
+    --font-jetbrains: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
     --background: 210 20% 98%;
     --foreground: 215 25% 15%;
     --card: 0 0% 100%;

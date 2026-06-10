@@ -18,6 +18,10 @@ export interface TintasDTO {
   cantidadProducida: string
   cantidadFaltante: string
   porcentaje: number
+  // Campos calculados y limpios por el backend
+  metrosSolicitados: number
+  metrosFaltantes: number
+  requiereIngresoManual: boolean
 }
 
 const HUB_URL =
@@ -49,6 +53,15 @@ function toTintasArray(payload: unknown): TintasDTO[] {
           typeof value.porcentaje === "number"
             ? value.porcentaje
             : Number(value.porcentaje ?? 0),
+        metrosSolicitados:
+          typeof value.metrosSolicitados === "number"
+            ? value.metrosSolicitados
+            : Number(value.metrosSolicitados ?? 0),
+        metrosFaltantes:
+          typeof value.metrosFaltantes === "number"
+            ? value.metrosFaltantes
+            : Number(value.metrosFaltantes ?? 0),
+        requiereIngresoManual: Boolean(value.requiereIngresoManual ?? false),
       }
     })
     .filter((item) => item.prensa.length > 0)

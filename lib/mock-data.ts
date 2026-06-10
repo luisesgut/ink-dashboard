@@ -1,6 +1,6 @@
 export type EstadoMaquina = "activa" | "parada" | "cambio"
 export type SistemaTinta = "tradicional" | "colortrack"
-export type EstadoSolicitud = "pendiente" | "fabricando" | "fabricado" | "entregado"
+export type EstadoSolicitud = "pendiente" | "fabricando" | "fabricado" | "entregado" | "depositado"
 export type NivelUrgencia = "rojo" | "naranja" | "verde"
 
 export interface Anilox {
@@ -44,6 +44,10 @@ export interface SolicitudTinta {
   timestamp: Date
   impresoraId: string
   impresoraNombre: string
+  ordenProduccion?: string
+  printCard?: string
+  metrosCalculo?: number
+  runKey?: string
   cuerpoNumero: number
   color: string
   serieTinta: string
@@ -135,5 +139,7 @@ export function getEstadoLabel(estado: EstadoSolicitud): string {
       return "Fabricado"
     case "entregado":
       return "Entregado"
+    case "depositado":
+      return "Depositado"
   }
 }

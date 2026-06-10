@@ -83,10 +83,10 @@ export function PrinterCard({
   const velocidad = trabajo?.velocidadActual ?? 0
 
   return (
-    <Link href={`/maquina/${impresora.id}`} className="block outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-xl">
+    <Link href={`/maquina/${impresora.id}`} className="block h-full outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-xl">
       <div
         className={cn(
-          "group relative rounded-xl border bg-card border-l-4 transition-all duration-200",
+          "group relative h-full min-h-[220px] rounded-xl border bg-card border-l-4 transition-all duration-200",
           "hover:shadow-md hover:shadow-black/5 dark:hover:shadow-black/20",
           "hover:-translate-y-0.5 cursor-pointer",
           config.borderClass,
@@ -103,7 +103,7 @@ export function PrinterCard({
           </span>
         )}
 
-        <div className="p-4 flex flex-col gap-3">
+        <div className="p-4 flex flex-col gap-3 h-full">
           {/* Header row */}
           <div className="flex items-start justify-between gap-2">
             <div className="flex items-center gap-2 min-w-0">

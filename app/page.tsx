@@ -1,12 +1,13 @@
 "use client"
 
 import { useEffect, useMemo, useState } from "react"
+import Link from "next/link"
 import { PrinterCard } from "@/components/printer-card"
 import { Card, CardContent } from "@/components/ui/card"
 import { useTableroHub } from "@/lib/tablero-hub"
 import { mergeCatalogoConHub, tintasToImpresoras } from "@/lib/tablero-mappers"
 import { getMaquinasCatalogo, type CatalogoMaquina } from "@/lib/pocketbase"
-import { LoaderCircle, Printer, Wifi, WifiOff, Activity } from "lucide-react"
+import { LoaderCircle, Printer, Wifi, WifiOff, Activity, FlaskConical } from "lucide-react"
 import { cn } from "@/lib/utils"
 
 function StatPill({
@@ -148,6 +149,17 @@ export default function DashboardPage() {
         </div>
       </div>
 
+      {/* Beta warning */}
+      <div className="rounded-lg border border-amber-300 bg-amber-500/10 px-4 py-3 flex items-start gap-3">
+        <FlaskConical className="h-4 w-4 text-amber-600 dark:text-amber-400 mt-0.5 shrink-0" />
+        <div>
+          <p className="text-sm font-semibold text-amber-800 dark:text-amber-300">Sistema en fase de pruebas y calibración</p>
+          <p className="text-xs text-amber-700 dark:text-amber-400 mt-0.5">
+            Los cálculos de consumo son estimaciones. Revisa y verifica los resultados antes de solicitar materiales para evitar desperdicio innecesario.
+          </p>
+        </div>
+      </div>
+
       {/* Stats row */}
       {!cargandoHub && impresoras.length > 0 && (
         <div className="flex flex-wrap gap-2">
@@ -182,7 +194,41 @@ export default function DashboardPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <Link href="/maquina/prueba-manual/solicitud" className="block h-full outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-xl">
+            <div className="group relative h-full min-h-[220px] rounded-xl border bg-card border-l-4 border-l-sky-500 transition-all duration-200 hover:shadow-md hover:shadow-black/5 dark:hover:shadow-black/20 hover:-translate-y-0.5 cursor-pointer">
+              <div className="flex h-full flex-col gap-4 p-4">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className="mt-0.5 h-2 w-2 flex-shrink-0 rounded-full bg-sky-500" />
+                    <h3 className="text-sm font-bold text-foreground truncate leading-tight">
+                      Maquina de prueba
+                    </h3>
+                  </div>
+                  <span className="inline-flex items-center gap-1 rounded-md border border-sky-300 bg-sky-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-sky-700 dark:text-sky-300">
+                    <FlaskConical className="h-2.5 w-2.5" />
+                    Manual
+                  </span>
+                </div>
+
+                <div className="flex flex-1 flex-col justify-center gap-3 text-muted-foreground">
+                  <FlaskConical className="h-8 w-8 text-sky-500/70" />
+                  <div>
+                    <p className="text-xs font-semibold text-foreground">Prueba por Print Card</p>
+                    <p className="mt-1 text-[11px] leading-snug">
+                      Captura printcard, metros, ancho y kilos manuales; las tintas salen del endpoint real.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="border-t border-border/60 pt-3">
+                  <span className="text-[10px] font-semibold uppercase text-sky-700 dark:text-sky-300">
+                    Crear solicitud de prueba
+                  </span>
+                </div>
+              </div>
+            </div>
+          </Link>
           {impresoras.map((impresora) => {
             const row = datosTablero.find(d =>
               d.prensa.replace(/\D/g, "").padStart(2, "0") === impresora.id.replace(/\D/g, "").padStart(2, "0")

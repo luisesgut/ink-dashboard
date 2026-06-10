@@ -7,6 +7,7 @@ const statusStyles: Record<EstadoSolicitud, string> = {
   fabricando: "bg-amber-100 text-amber-800 border-amber-300",
   fabricado: "bg-emerald-100 text-emerald-800 border-emerald-300",
   entregado: "bg-primary/10 text-primary border-primary/30",
+  depositado: "bg-violet-100 text-violet-800 border-violet-300 dark:bg-violet-900/20 dark:text-violet-400 dark:border-violet-700",
 }
 
 export function StatusBadge({
