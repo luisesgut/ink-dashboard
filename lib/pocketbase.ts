@@ -38,7 +38,8 @@ export interface AniloxCatalogo {
   bcm: number
 }
 
-interface PrintCardData {
+export interface PrintCardData {
+  id?: string
   print_card: string
   producto: string
   ancho: number
@@ -66,6 +67,7 @@ export async function getAniloxCatalogo(): Promise<AniloxCatalogo[]> {
 
 export const TRANSFERENCIA = 0.3
 export const DILUCION = 0.1
+export const BCM_A_CM3_M2 = 1.55
 
 export function normalizarCobertura(value: unknown): number {
   const cobertura = parseFloat(String(value ?? "0")) || 0
@@ -211,6 +213,46 @@ export async function getPrintCardHibrido(
   return resultados
 }
 
+export async function getPrintCardDesdePocketBase(
+  pc: PrintCardData,
+  metros: number,
+  anchoCm: number,
+  kgBase: number
+): Promise<KgPorColor[]> {
+  const resultados: KgPorColor[] = []
+
+  for (let i = 0; i < pc.colores.length; i += 1) {
+    const colorNombre = pc.colores[i]
+    if (!colorNombre) continue
+
+    const tinta = await getTinta(colorNombre)
+    const cobertura = pc.coberturas[i] || tinta?.cobertura || 0
+    const bcm = tinta?.bcm ?? 0
+    const densidad = tinta?.densidad ?? 0.9
+    const anilox = tinta?.anilox ?? 0
+
+    const { kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
+      metros, anchoCm, bcm, densidad, cobertura, kgBase
+    )
+
+    resultados.push({
+      color: colorNombre,
+      tinta: tinta?.tinta ?? limpiarNombrePantone(colorNombre),
+      bcm,
+      densidad,
+      cobertura,
+      kgConsumo,
+      kgBase: kgBaseCalculado,
+      kgBruto,
+      kgTinta,
+      kgDisolvente,
+      anilox,
+    })
+  }
+
+  return resultados
+}
+
 export function calcularKgPorColor(
   metros: number,
   anchoCm: number,
@@ -223,19 +265,20 @@ export function calcularKgPorColor(
   if (!bcm || !densidad || !anchoCm) {
     return { kgConsumo: 0, kgBase: 0, kgBruto: 0, kgTinta: 0, kgDisolvente: 0 }
   }
-  const m2 = metros * anchoCm / 100
-  const pctTinta = 1 / (1 + DILUCION)
+  const m2 = metros * (anchoCm / 100)
+  const factorCobertura = cobertura > 1 ? cobertura / 100 : cobertura
+  const volumenMetricoAnilox = bcm * BCM_A_CM3_M2
   const pctDisolvente = DILUCION / (1 + DILUCION)
-  const base = (m2 * bcm * densidad / 1000) * cobertura * TRANSFERENCIA
-  const kgConsumo = Math.round(base * pctTinta * 100) / 100
-  const kgBruto = Math.round((kgConsumo + kgBase) * 100) / 100
-  const kgTinta = Math.max(0, kgBruto - kgEnMaquina)
-  const kgDisolvente = base * pctDisolvente
+  const kgMezclaConsumida = (m2 * volumenMetricoAnilox * factorCobertura * TRANSFERENCIA * densidad) / 1000
+  const kgMezclaNecesariaTotal = kgMezclaConsumida + kgBase
+  const kgAPrepararTotal = Math.max(0, kgMezclaNecesariaTotal - kgEnMaquina)
+  const kgDisolvente = kgAPrepararTotal * pctDisolvente
+
   return {
-    kgConsumo: Math.round(kgConsumo * 100) / 100,
+    kgConsumo: Math.round(kgMezclaConsumida * 100) / 100,
     kgBase: Math.round(kgBase * 100) / 100,
-    kgBruto: Math.round(kgBruto * 100) / 100,
-    kgTinta: Math.round(kgTinta * 100) / 100,
+    kgBruto: Math.round(kgMezclaNecesariaTotal * 100) / 100,
+    kgTinta: Math.round(kgAPrepararTotal * 100) / 100,
     kgDisolvente: Math.round(kgDisolvente * 100) / 100,
   }
 }
@@ -247,13 +290,16 @@ export function calcularTiempoPorTinta(
   bcm: number,
   densidad: number,
   cobertura: number,
+  kgBase: number = 0,
 ): number {
-  if (!velocidad || !bcm || !densidad || !anchoCm || !kgEnMaquina) return 999
-  const pctTinta = 1 / (1 + DILUCION)
-  const consumoPorMetro = (anchoCm / 100 * bcm * densidad / 1000) * cobertura * TRANSFERENCIA * pctTinta
+  if (!velocidad || !bcm || !densidad || !anchoCm) return 999
+  const factorCobertura = cobertura > 1 ? cobertura / 100 : cobertura
+  const volumenMetricoAnilox = bcm * BCM_A_CM3_M2
+  const consumoPorMetro = ((anchoCm / 100) * volumenMetricoAnilox * factorCobertura * TRANSFERENCIA * densidad) / 1000
   if (!consumoPorMetro) return 999
   const consumoPorMinuto = consumoPorMetro * velocidad
-  return Math.round(kgEnMaquina / consumoPorMinuto)
+  const kgUtiles = Math.max(0, kgEnMaquina - kgBase)
+  return Math.round(kgUtiles / consumoPorMinuto)
 }
 
 export interface InkReturn {
@@ -264,6 +310,28 @@ export interface InkReturn {
   confirmado: boolean
   created: string
   updated: string
+}
+
+export function consolidarInkReturnsPorPantone(rows: InkReturn[]): Map<string, InkReturn> {
+  const mapa = new Map<string, InkReturn>()
+
+  for (const row of rows) {
+    const actual = mapa.get(row.pantone)
+    if (!actual) {
+      mapa.set(row.pantone, row)
+      continue
+    }
+
+    const preferido = row.confirmado && !actual.confirmado ? row : actual
+    mapa.set(row.pantone, {
+      ...preferido,
+      kg_disponibles: actual.kg_disponibles + row.kg_disponibles,
+      confirmado: actual.confirmado && row.confirmado,
+      updated: row.updated > actual.updated ? row.updated : actual.updated,
+    })
+  }
+
+  return mapa
 }
 
 function mapInkReturn(item: Record<string, unknown>): InkReturn {
@@ -344,13 +412,14 @@ export async function confirmInkReturn(id: string): Promise<InkReturn | null> {
 export async function createInkReturn(
   machineId: string,
   pantone: string,
-  kgDisponibles: number
+  kgDisponibles: number,
+  confirmado: boolean = false
 ): Promise<InkReturn | null> {
   try {
     const res = await fetch(`${PB_URL}/api/collections/ink_returns/records`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ machine_id: machineId, pantone, kg_disponibles: kgDisponibles, confirmado: false }),
+      body: JSON.stringify({ machine_id: machineId, pantone, kg_disponibles: kgDisponibles, confirmado }),
     })
     if (!res.ok) return null
     return mapInkReturn(await res.json())
@@ -360,12 +429,19 @@ export async function createInkReturn(
   }
 }
 
-export async function updateInkReturn(id: string, kgDisponibles: number): Promise<InkReturn | null> {
+export async function updateInkReturn(
+  id: string,
+  kgDisponibles: number,
+  confirmado?: boolean
+): Promise<InkReturn | null> {
   try {
+    const payload: { kg_disponibles: number; confirmado?: boolean } = { kg_disponibles: kgDisponibles }
+    if (confirmado !== undefined) payload.confirmado = confirmado
+
     const res = await fetch(`${PB_URL}/api/collections/ink_returns/records/${id}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ kg_disponibles: kgDisponibles }),
+      body: JSON.stringify(payload),
     })
     if (!res.ok) return null
     return mapInkReturn(await res.json())
@@ -402,12 +478,13 @@ function parsePrintCardRecord(r: Record<string, unknown>): PrintCardData {
   for (let i = 1; i <= 10; i += 1) {
     const color = String(r[`color_${i}`] ?? "").trim()
     const cobertura = normalizarCobertura(r[`cob_${i}`])
-    if (!color || !cobertura) continue
+    if (!color) continue
     colores.push(color)
     coberturas.push(cobertura)
   }
 
   return {
+    id: String(r.id ?? "") || undefined,
     print_card: String(r.print_card ?? ""),
     producto: String(r.producto ?? ""),
     ancho: parseFloat(String(r.ancho ?? "0")) || 0,
@@ -419,15 +496,89 @@ function parsePrintCardRecord(r: Record<string, unknown>): PrintCardData {
 
 export async function getPrintCard(printCard: string): Promise<PrintCardData | null> {
   try {
-    const res = await fetch(
-      `${PB_URL}/api/collections/print_cards/records?filter=(print_card='${encodeURIComponent(printCard)}')&perPage=1`
-    )
-    if (!res.ok) return null
-    const data = await res.json()
-    if (!data.items?.length) return null
-    return parsePrintCardRecord(data.items[0])
+    const filter = encodeURIComponent(`(print_card='${escapePocketBaseString(printCard)}')`)
+    const collections = ["print_cards", "printcard"]
+
+    for (const collection of collections) {
+      const res = await fetch(
+        `${PB_URL}/api/collections/${collection}/records?filter=${filter}&perPage=1`
+      )
+      if (!res.ok) continue
+
+      const data = await res.json()
+      if (data.items?.length) return parsePrintCardRecord(data.items[0])
+    }
+
+    return null
   } catch (e) {
     console.error("Error fetching print card:", e)
+    return null
+  }
+}
+
+export async function getPrintCardsCatalogo(): Promise<PrintCardData[]> {
+  try {
+    const collections = ["print_cards", "printcard"]
+    const printCards = new Map<string, PrintCardData>()
+
+    for (const collection of collections) {
+      let page = 1
+      let totalPages = 1
+
+      do {
+        const res = await fetch(
+          `${PB_URL}/api/collections/${collection}/records?sort=print_card&perPage=500&page=${page}`
+        )
+        if (!res.ok) break
+
+        const data = await res.json()
+        totalPages = data.totalPages ?? 1
+
+        for (const item of data.items ?? []) {
+          const pc = parsePrintCardRecord(item)
+          if (!pc.print_card || printCards.has(pc.print_card)) continue
+          printCards.set(pc.print_card, pc)
+        }
+
+        page += 1
+      } while (page <= totalPages)
+    }
+
+    return [...printCards.values()].sort((a, b) => a.print_card.localeCompare(b.print_card))
+  } catch (e) {
+    console.error("Error fetching catalogo de print cards:", e)
+    return []
+  }
+}
+
+export async function createPrintCard(pc: PrintCardData): Promise<PrintCardData | null> {
+  try {
+    const payload: Record<string, unknown> = {
+      print_card: pc.print_card,
+      producto: pc.producto,
+      ancho: pc.ancho,
+      maquina: pc.maquina,
+    }
+
+    pc.colores.slice(0, 10).forEach((color, index) => {
+      const n = index + 1
+      payload[`color_${n}`] = color
+      payload[`cob_${n}`] = pc.coberturas[index] ?? 0
+    })
+
+    const res = await fetch(`${PB_URL}/api/collections/print_cards/records${pc.id ? `/${pc.id}` : ""}`, {
+      method: pc.id ? "PATCH" : "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      console.error("Error creating print card:", await res.text())
+      return null
+    }
+
+    return parsePrintCardRecord(await res.json())
+  } catch (e) {
+    console.error("Error creating print card:", e)
     return null
   }
 }

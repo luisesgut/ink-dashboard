@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from "react"
+import Link from "next/link"
 import { useInkStore } from "@/lib/store"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
@@ -20,7 +21,6 @@ export default function NotificacionesPage() {
   const {
     notificaciones,
     impresoras,
-    confirmarRecepcion,
     marcarNotificacionLeida,
     marcarTodasLeidas,
     getNotificacionesSinLeer,
@@ -33,14 +33,6 @@ export default function NotificacionesPage() {
     filtroMaquina === "todas"
       ? notificaciones
       : notificaciones.filter((n) => n.impresoraId === filtroMaquina)
-
-  function handleConfirmarRecepcion(notifId: string, solicitudId: string) {
-    confirmarRecepcion(solicitudId)
-    marcarNotificacionLeida(notifId)
-    toast.success("Recepcion confirmada", {
-      description: "La tinta ha sido recibida y registrada en el historial",
-    })
-  }
 
   function handleMarcarTodasLeidas() {
     marcarTodasLeidas()
@@ -123,15 +115,16 @@ export default function NotificacionesPage() {
                   {notif.solicitudId}
                 </span>
                 {notif.tipo === "fabricado" && !notif.leida && (
-                  <Button
-                    size="sm"
-                    variant="default"
-                    className="mt-1"
-                    onClick={() => handleConfirmarRecepcion(notif.id, notif.solicitudId)}
-                  >
-                    <CheckCircle className="mr-1 h-3 w-3" />
-                    Confirmar Recepcion
-                  </Button>
+                  <Link href={`/maquina/${notif.impresoraId}`} className="mt-1">
+                    <Button
+                      size="sm"
+                      variant="default"
+                      onClick={() => marcarNotificacionLeida(notif.id)}
+                    >
+                      <CheckCircle className="mr-1 h-3 w-3" />
+                      Ir a recibir
+                    </Button>
+                  </Link>
                 )}
               </div>
             </div>

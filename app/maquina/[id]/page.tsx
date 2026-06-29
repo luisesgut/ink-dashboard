@@ -6,11 +6,12 @@ import { useParams } from "next/navigation"
 import { useInkStore } from "@/lib/store"
 import { useTableroHub } from "@/lib/tablero-hub"
 import { machineIdToPrensa, normalizePrensaCode } from "@/lib/tablero-mappers"
-import { calcularTiempoMinutos, determinarUrgencia, type NivelUrgencia } from "@/lib/mock-data"
+import { calcularTiempoMinutos, determinarUrgencia, type NivelUrgencia, type SolicitudTinta } from "@/lib/mock-data"
 import {
   getPrintCard, getTinta, calcularKgPorColor, calcularTiempoPorTinta, type KgPorColor,
   getInkReturns, createInkReturn, updateInkReturn, deleteInkReturn, type InkReturn,
   getAniloxCatalogo, getKgBaseMaquina, normalizarCobertura, type AniloxCatalogo,
+  consolidarInkReturnsPorPantone,
 } from "@/lib/pocketbase"
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -163,6 +164,13 @@ interface SolicitudConfirmacion {
   autorizacionExtra: boolean
 }
 
+interface RecepcionDeposito {
+  solicitud: SolicitudTinta
+  kgDepositarInput: string
+  destinoSobrante: "maquina" | "cocina"
+  guardando: boolean
+}
+
 interface ResumenTintaOrden {
   color: string
   calculado: number
@@ -181,6 +189,15 @@ function roundKg(value: number): number {
 
 function formatKg(value: number): string {
   return `${roundKg(value)} kg`
+}
+
+function getControlTintaEstado(kgCalculado: number, kgSolicitado: number) {
+  const diferencia = roundKg(kgSolicitado - kgCalculado)
+  if (!(kgCalculado > 0)) return { label: "Sin calculo", className: "border-border bg-muted text-muted-foreground", diferencia }
+  if (!(kgSolicitado > 0)) return { label: "Faltante", className: "border-red-300 bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400", diferencia }
+  if (Math.abs(diferencia) <= 0.05) return { label: "Correcto", className: "border-emerald-300 bg-emerald-50 text-emerald-700 dark:bg-emerald-950/30 dark:text-emerald-400", diferencia: 0 }
+  if (diferencia > 0) return { label: "Exceso", className: "border-amber-300 bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-400", diferencia }
+  return { label: "Faltante", className: "border-red-300 bg-red-50 text-red-700 dark:bg-red-950/30 dark:text-red-400", diferencia }
 }
 
 // ── Stat card ─────────────────────────────────────────────────────────────────
@@ -373,6 +390,7 @@ export default function MaquinaPage() {
   const [metrosDialogOpen, setMetrosDialogOpen] = useState(false)
   const [metrosDecisionOpen, setMetrosDecisionOpen] = useState(false)
   const [solicitudConfirmacion, setSolicitudConfirmacion] = useState<SolicitudConfirmacion | null>(null)
+  const [recepcionDeposito, setRecepcionDeposito] = useState<RecepcionDeposito | null>(null)
   const [controlTintasOpen, setControlTintasOpen] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const [kgBaseMaquina, setKgBaseMaquina] = useState(0)
@@ -432,7 +450,7 @@ export default function MaquinaPage() {
       }
       mapa.set(fila.color, {
         ...actual,
-        calculado: fila.kgBruto || 0,
+        calculado: fila.kgTinta || 0,
         enMaquina,
         sugerido: roundKg(Math.max(0, (fila.kgTinta || 0) - actual.solicitado)),
       })
@@ -446,7 +464,7 @@ export default function MaquinaPage() {
       const resumen = resumenPorColor.get(fila.color)
       return resumen ?? {
         color: fila.color,
-        calculado: fila.kgBruto || 0,
+        calculado: fila.kgTinta || 0,
         enMaquina: parseFloat(fila.kgEnMaquina) || 0,
         solicitado: 0,
         pendiente: 0,
@@ -493,7 +511,7 @@ export default function MaquinaPage() {
     if (requestId !== loadRequestRef.current) return
 
     setAniloxCatalogo(catalogoAnilox)
-    const inkReturnsMap = new Map(inkReturnsList.map(r => [r.pantone, r]))
+    const inkReturnsMap = consolidarInkReturnsPorPantone(inkReturnsList)
     setInkReturns(inkReturnsMap)
 
     const anchoVal = pcData?.ancho ?? 0
@@ -619,6 +637,22 @@ export default function MaquinaPage() {
     setKgBaseMaquina(0)
   }, [printCard, metrosRestantesEfectivos, normalizedId, cargarColores])
 
+  useEffect(() => {
+    if (!printCard) return
+    let disposed = false
+
+    const refreshInkReturns = async () => {
+      const rows = await getInkReturns(normalizedId)
+      if (!disposed) setInkReturns(consolidarInkReturnsPorPantone(rows))
+    }
+
+    const interval = window.setInterval(() => void refreshInkReturns(), 5000)
+    return () => {
+      disposed = true
+      window.clearInterval(interval)
+    }
+  }, [printCard, normalizedId])
+
   function actualizarFila(index: number, campo: keyof FilaColor, valor: string) {
     setFilas(prev => {
       const nuevas = [...prev]
@@ -646,6 +680,35 @@ export default function MaquinaPage() {
     })
   }
 
+  function aplicarDepositoEnFila(pantone: string, kgDepositados: number) {
+    if (!(kgDepositados > 0)) return
+
+    setFilas(prev => prev.map(fila => {
+      if (fila.color !== pantone) return fila
+
+      const kgEnMaq = roundKg((parseFloat(fila.kgEnMaquina) || 0) + kgDepositados)
+      const { kgConsumo, kgBase: kgBaseCalculado, kgBruto, kgTinta, kgDisolvente } = calcularKgPorColor(
+        metrosRestantesEfectivos,
+        anchoCm,
+        fila.bcm,
+        fila.densidad,
+        fila.cobertura,
+        kgBaseActual,
+        kgEnMaq
+      )
+
+      return {
+        ...fila,
+        kgEnMaquina: String(kgEnMaq),
+        kgConsumo,
+        kgBase: kgBaseCalculado,
+        kgBruto,
+        kgTinta,
+        kgDisolvente,
+      }
+    }))
+  }
+
   function seleccionarAnilox(index: number, lpi: number, bcm: number) {
     setFilas(prev => {
       const nuevas = [...prev]
@@ -671,6 +734,85 @@ export default function MaquinaPage() {
     return faltantes
   }
 
+  function calcularAutonomiaFila(fila: FilaColor): number {
+    return aplicarMargen(calcularTiempoPorTinta(
+      parseFloat(fila.kgEnMaquina) || 0,
+      parseFloat(velocidad) || 0,
+      anchoCm,
+      fila.bcm,
+      fila.densidad,
+      fila.cobertura,
+      kgBaseActual
+    ))
+  }
+
+  function abrirRecepcionDeposito(sol: SolicitudTinta) {
+    const kgFabricados = sol.kgFabricados ?? sol.kgAFabricar
+    const kgDepositar = Math.min(kgFabricados, sol.kgAFabricar)
+    setRecepcionDeposito({
+      solicitud: sol,
+      kgDepositarInput: String(roundKg(kgDepositar)),
+      destinoSobrante: "maquina",
+      guardando: false,
+    })
+  }
+
+  async function confirmarRecepcionDeposito() {
+    if (!recepcionDeposito) return
+
+    const { solicitud, destinoSobrante } = recepcionDeposito
+    const kgFabricados = solicitud.kgFabricados ?? solicitud.kgAFabricar
+    const kgDepositar = roundKg(parseFloat(recepcionDeposito.kgDepositarInput) || 0)
+
+    if (kgDepositar < 0 || kgDepositar > kgFabricados) {
+      toast.error("Los kg a depositar no pueden exceder lo fabricado")
+      return
+    }
+
+    const kgSobrante = roundKg(Math.max(0, kgFabricados - kgDepositar))
+    setRecepcionDeposito(prev => prev ? { ...prev, guardando: true } : prev)
+
+    try {
+      await confirmarRecepcion(solicitud.id)
+
+      if (kgSobrante > 0) {
+        const existente = inkReturns.get(solicitud.color)
+        const puedeSumarExistente = !!existente && (destinoSobrante === "maquina" || !existente.confirmado)
+        const registro = puedeSumarExistente
+          ? await updateInkReturn(
+              existente.id,
+              roundKg(existente.kg_disponibles + kgSobrante),
+              destinoSobrante === "maquina" ? true : existente.confirmado
+            )
+          : await createInkReturn(
+              normalizedId,
+              solicitud.color,
+              kgSobrante,
+              destinoSobrante === "maquina"
+            )
+
+        if (!registro) {
+          toast.error("No se pudo registrar el sobrante")
+          setRecepcionDeposito(prev => prev ? { ...prev, guardando: false } : prev)
+          return
+        }
+        setInkReturns(prev => new Map(prev).set(solicitud.color, registro))
+      }
+
+      await confirmarDeposito(solicitud.id)
+      aplicarDepositoEnFila(solicitud.color, kgDepositar)
+      setRecepcionDeposito(null)
+      toast.success("Tinta recibida y depositada", {
+        description: kgSobrante > 0
+          ? `${kgDepositar} kg a máquina · ${kgSobrante} kg ${destinoSobrante === "maquina" ? "quedan disponibles" : "a devolución"}`
+          : `${kgDepositar} kg depositados en máquina`,
+      })
+    } catch {
+      toast.error("Error al confirmar recepción")
+      setRecepcionDeposito(prev => prev ? { ...prev, guardando: false } : prev)
+    }
+  }
+
   async function solicitarColor(index: number) {
     const fila = filas[index]
     const faltantes = getMissingFields(fila)
@@ -680,8 +822,7 @@ export default function MaquinaPage() {
       return
     }
 
-    const vel = parseFloat(velocidad) || 0
-    const tiempoMin = aplicarMargen(calcularTiempoMinutos(metrosRestantesEfectivos, vel))
+    const tiempoMin = calcularAutonomiaFila(fila)
     const urgencia = determinarUrgencia(tiempoMin)
     const resumen = resumenPorColor.get(fila.color)
     const kgSugeridos = resumen?.sugerido ?? fila.kgTinta
@@ -1330,6 +1471,135 @@ export default function MaquinaPage() {
         )
       })()}
 
+      {/* ── Reception and deposit modal ── */}
+      {recepcionDeposito && (() => {
+        const sol = recepcionDeposito.solicitud
+        const kgFabricados = sol.kgFabricados ?? sol.kgAFabricar
+        const kgDepositar = roundKg(parseFloat(recepcionDeposito.kgDepositarInput) || 0)
+        const kgSobrante = roundKg(Math.max(0, kgFabricados - kgDepositar))
+        const kgExtra = roundKg(Math.max(0, kgFabricados - sol.kgAFabricar))
+
+        return (
+          <Dialog
+            open
+            onOpenChange={open => {
+              if (!open && !recepcionDeposito.guardando) setRecepcionDeposito(null)
+            }}
+          >
+            <DialogContent className="sm:max-w-lg">
+              <DialogHeader>
+                <DialogTitle>Recibir y depositar tinta</DialogTitle>
+                <DialogDescription>
+                  Confirma cuánto entra a máquina y qué pasará con el sobrante.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-4">
+                <div className="rounded-lg border bg-muted/20 px-3 py-2">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="font-mono text-sm font-semibold text-foreground">{sol.id}</p>
+                      <p className="mt-1 text-sm font-semibold text-foreground">{sol.color}</p>
+                      <p className="text-xs text-muted-foreground">{sol.serieTinta}</p>
+                    </div>
+                    {kgExtra > 0 && (
+                      <Badge className="bg-amber-600 text-white">
+                        Cocina preparó {formatKg(kgExtra)} extra
+                      </Badge>
+                    )}
+                  </div>
+
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    <div className="rounded-md border bg-background px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Solicitado</p>
+                      <p className="font-mono text-sm font-semibold">{formatKg(sol.kgAFabricar)}</p>
+                    </div>
+                    <div className="rounded-md border bg-background px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Fabricado</p>
+                      <p className="font-mono text-sm font-semibold">{formatKg(kgFabricados)}</p>
+                    </div>
+                    <div className="rounded-md border bg-background px-3 py-2">
+                      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">Sobrante</p>
+                      <p className="font-mono text-sm font-semibold">{formatKg(kgSobrante)}</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-xs font-medium">Kg a depositar en máquina</label>
+                  <Input
+                    type="number"
+                    min="0"
+                    max={kgFabricados}
+                    step="0.1"
+                    value={recepcionDeposito.kgDepositarInput}
+                    onChange={e => setRecepcionDeposito(prev => prev ? { ...prev, kgDepositarInput: e.target.value } : prev)}
+                    className="font-mono text-right"
+                    autoFocus
+                  />
+                  <p className="text-[10px] text-muted-foreground">
+                    Máximo disponible: {formatKg(kgFabricados)}
+                  </p>
+                </div>
+
+                {kgSobrante > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-medium">Destino del sobrante</p>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <button
+                        type="button"
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                          recepcionDeposito.destinoSobrante === "maquina"
+                            ? "border-emerald-400 bg-emerald-50 text-emerald-800 dark:bg-emerald-950/20 dark:text-emerald-300"
+                            : "hover:bg-muted/50"
+                        )}
+                        onClick={() => setRecepcionDeposito(prev => prev ? { ...prev, destinoSobrante: "maquina" } : prev)}
+                      >
+                        <span className="font-semibold">Se queda en máquina</span>
+                        <span className="mt-0.5 block text-xs opacity-80">Queda disponible para otro trabajo.</span>
+                      </button>
+                      <button
+                        type="button"
+                        className={cn(
+                          "rounded-lg border px-3 py-2 text-left text-sm transition-colors",
+                          recepcionDeposito.destinoSobrante === "cocina"
+                            ? "border-amber-400 bg-amber-50 text-amber-800 dark:bg-amber-950/20 dark:text-amber-300"
+                            : "hover:bg-muted/50"
+                        )}
+                        onClick={() => setRecepcionDeposito(prev => prev ? { ...prev, destinoSobrante: "cocina" } : prev)}
+                      >
+                        <span className="font-semibold">Regresa a cocina</span>
+                        <span className="mt-0.5 block text-xs opacity-80">Aparece en devoluciones para confirmar.</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={() => setRecepcionDeposito(null)}
+                  disabled={recepcionDeposito.guardando}
+                >
+                  Cancelar
+                </Button>
+                <Button
+                  type="button"
+                  onClick={() => void confirmarRecepcionDeposito()}
+                  disabled={recepcionDeposito.guardando || kgDepositar < 0 || kgDepositar > kgFabricados}
+                >
+                  {recepcionDeposito.guardando && <LoaderCircle className="mr-1 h-3 w-3 animate-spin" />}
+                  Confirmar depósito
+                </Button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
+        )
+      })()}
+
       {/* ── Return modal ── */}
       {returnModal && (
         <Dialog open onOpenChange={open => { if (!open) { setReturnModal(null); setReturnKgInput("") } }}>
@@ -1391,7 +1661,15 @@ export default function MaquinaPage() {
                 <FlashingAlert tipo={n.tipo} mensaje={n.mensaje} timestamp={n.timestamp} leida={n.leida} />
               </div>
               {n.tipo === "fabricado" && (
-                <Button size="sm" onClick={() => confirmarRecepcion(n.solicitudId)}>Confirmar Recepción</Button>
+                <Button
+                  size="sm"
+                  onClick={() => {
+                    const sol = solicitudesMaquina.find(s => s.id === n.solicitudId)
+                    if (sol) abrirRecepcionDeposito(sol)
+                  }}
+                >
+                  Confirmar Recepción
+                </Button>
               )}
             </div>
           ))}
@@ -1422,6 +1700,11 @@ export default function MaquinaPage() {
                   <span className="text-muted-foreground">Kg: </span>
                   <span className="font-mono font-bold">{s.kgAFabricar}</span>
                 </div>
+                {s.estado === "fabricado" && (s.kgFabricados ?? 0) > s.kgAFabricar && (
+                  <Badge className="bg-amber-600 text-white">
+                    +{formatKg((s.kgFabricados ?? 0) - s.kgAFabricar)} extra
+                  </Badge>
+                )}
                 <div className={cn(
                   "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-semibold",
                   deadlineBadgeClass(deadline.tone)
@@ -1433,7 +1716,7 @@ export default function MaquinaPage() {
                 <UrgencyBadge urgencia={s.urgencia} />
                 <StatusBadge estado={s.estado} />
                 {s.estado === "fabricado" && (
-                  <Button size="sm" onClick={() => confirmarRecepcion(s.id)}>Confirmar Recepción</Button>
+                  <Button size="sm" onClick={() => abrirRecepcionDeposito(s)}>Confirmar Recepción</Button>
                 )}
                 {s.estado === "entregado" && (
                   <Button
@@ -1498,6 +1781,7 @@ export default function MaquinaPage() {
                     const listo = item.fabricado + item.entregado
                     const cubierto = item.enMaquina + item.solicitado
                     const completo = item.sugerido <= 0 && item.calculado > 0
+                    const estadoControl = getControlTintaEstado(item.calculado, item.solicitado)
 
                     return (
                       <div key={item.color} className="bg-card p-3">
@@ -1510,14 +1794,9 @@ export default function MaquinaPage() {
                           </div>
                           <Badge
                             variant="outline"
-                            className={cn(
-                              "shrink-0 text-[10px]",
-                              completo
-                                ? "border-emerald-300 bg-emerald-500/10 text-emerald-700 dark:text-emerald-400"
-                                : "border-amber-300 bg-amber-500/10 text-amber-700 dark:text-amber-400"
-                            )}
+                            className={cn("shrink-0 text-[10px]", estadoControl.className)}
                           >
-                            {completo ? "Cubierto" : `Pedir ${formatKg(item.sugerido)}`}
+                            {estadoControl.label}
                           </Badge>
                         </div>
                         <div className="mt-3 grid grid-cols-2 gap-2 text-[10px]">
@@ -1528,6 +1807,15 @@ export default function MaquinaPage() {
                           <div className="rounded-md border bg-background px-2 py-1.5">
                             <p className="text-muted-foreground">Solicitado</p>
                             <p className="font-mono font-semibold text-foreground">{formatKg(item.solicitado)}</p>
+                          </div>
+                          <div className="rounded-md border bg-background px-2 py-1.5">
+                            <p className="text-muted-foreground">Diferencia</p>
+                            <p className={cn(
+                              "font-mono font-semibold",
+                              estadoControl.diferencia > 0 ? "text-amber-700 dark:text-amber-400" : estadoControl.diferencia < 0 ? "text-red-700 dark:text-red-400" : "text-emerald-700 dark:text-emerald-400"
+                            )}>
+                              {estadoControl.diferencia > 0 ? "+" : ""}{formatKg(estadoControl.diferencia)}
+                            </p>
                           </div>
                           <div className="rounded-md border bg-background px-2 py-1.5">
                             <p className="text-muted-foreground">Pend./fab.</p>
@@ -1541,6 +1829,7 @@ export default function MaquinaPage() {
                         {cubierto > 0 && (
                           <p className="mt-2 text-[10px] text-muted-foreground">
                             Cobertura registrada: <span className="font-mono text-foreground">{formatKg(cubierto)}</span>
+                            {!completo && <> · pendiente sugerido <span className="font-mono text-foreground">{formatKg(item.sugerido)}</span></>}
                           </p>
                         )}
                       </div>
@@ -1800,17 +2089,12 @@ export default function MaquinaPage() {
                             placeholder="seg"
                           />
                         </td>
-                                  <td className="px-4 py-3 text-center">
-                                  {fila.kgEnMaquina && parseFloat(fila.kgEnMaquina) > kgBaseActual && velocidad && fila.bcm ? (() => {
-            const kgUtiles = Math.max(0, (parseFloat(fila.kgEnMaquina) || 0) - kgBaseActual)
-            const t = aplicarMargen(calcularTiempoPorTinta(
-              kgUtiles,
-              parseFloat(velocidad) || 0,
-              anchoCm, fila.bcm, fila.densidad, fila.cobertura
-            ))
-            const u = determinarUrgencia(t)
-            return <UrgencyBadge urgencia={u} tiempoMin={t === 999 ? undefined : t} pulsing />
-          })() : <span className="text-xs text-muted-foreground/50">—</span>}
+                        <td className="px-4 py-3 text-center">
+                          {fila.kgEnMaquina && velocidad && fila.bcm ? (() => {
+                            const t = calcularAutonomiaFila(fila)
+                            const u = determinarUrgencia(t)
+                            return <UrgencyBadge urgencia={u} tiempoMin={t === 999 ? undefined : t} pulsing />
+                          })() : <span className="text-xs text-muted-foreground/50">—</span>}
                         </td>
                         <td className="px-4 py-3 text-right">
                           {(() => {

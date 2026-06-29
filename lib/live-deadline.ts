@@ -32,7 +32,13 @@ export function getLiveDeadline(
 ): LiveDeadline {
   const createdMs = created instanceof Date ? created.getTime() : new Date(created).getTime()
 
-  if (!Number.isFinite(createdMs) || !estimatedMinutes || estimatedMinutes === 999) {
+  if (
+    !Number.isFinite(createdMs) ||
+    estimatedMinutes === null ||
+    estimatedMinutes === undefined ||
+    !Number.isFinite(estimatedMinutes) ||
+    estimatedMinutes === 999
+  ) {
     return {
       hasDeadline: false,
       deadlineMs: null,

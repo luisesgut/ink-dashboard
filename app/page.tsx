@@ -5,10 +5,12 @@ import Link from "next/link"
 import { PrinterCard } from "@/components/printer-card"
 import { Card, CardContent } from "@/components/ui/card"
 import { useTableroHub } from "@/lib/tablero-hub"
-import { mergeCatalogoConHub, tintasToImpresoras } from "@/lib/tablero-mappers"
+import { mergeCatalogoConHub, normalizePrensaCode, tintasToImpresoras } from "@/lib/tablero-mappers"
 import { getMaquinasCatalogo, type CatalogoMaquina } from "@/lib/pocketbase"
 import { LoaderCircle, Printer, Wifi, WifiOff, Activity, FlaskConical } from "lucide-react"
 import { cn } from "@/lib/utils"
+
+const DASHBOARD_MACHINE_CODES = new Set(["03"])
 
 function StatPill({
   count,
@@ -56,13 +58,27 @@ export default function DashboardPage() {
   const [catalogoMaquinas, setCatalogoMaquinas] = useState<CatalogoMaquina[]>([])
   const [catalogoError, setCatalogoError] = useState<string | null>(null)
 
-  const impresorasHub = useMemo(() => tintasToImpresoras(datosTablero), [datosTablero])
+  const datosDashboard = useMemo(
+    () => datosTablero.filter((row) => {
+      const codigo = normalizePrensaCode(row.prensa)
+      return !!codigo && DASHBOARD_MACHINE_CODES.has(codigo)
+    }),
+    [datosTablero]
+  )
+  const catalogoDashboard = useMemo(
+    () => catalogoMaquinas.filter((maquina) => {
+      const codigo = normalizePrensaCode(maquina.codigo)
+      return !!codigo && DASHBOARD_MACHINE_CODES.has(codigo)
+    }),
+    [catalogoMaquinas]
+  )
+  const impresorasHub = useMemo(() => tintasToImpresoras(datosDashboard), [datosDashboard])
   const impresoras = useMemo(
     () =>
-      catalogoMaquinas.length > 0
-        ? mergeCatalogoConHub(catalogoMaquinas, datosTablero)
+      catalogoDashboard.length > 0
+        ? mergeCatalogoConHub(catalogoDashboard, datosDashboard)
         : impresorasHub,
-    [catalogoMaquinas, datosTablero, impresorasHub]
+    [catalogoDashboard, datosDashboard, impresorasHub]
   )
   const cargandoHub = !hasSynced && connectionState !== "Disconnected"
 
@@ -99,8 +115,8 @@ export default function DashboardPage() {
   }, [])
 
   useEffect(() => {
-    if (!datosTablero.length) return
-    const printCards = [...new Set(datosTablero.map(d => d.printCard).filter(Boolean))]
+    if (!datosDashboard.length) return
+    const printCards = [...new Set(datosDashboard.map(d => d.printCard).filter(Boolean))]
 
     Promise.all(
       printCards.map(async pc => {
@@ -116,7 +132,7 @@ export default function DashboardPage() {
     ).then(results => {
       setPrintCardsConDatos(new Set(results.filter(Boolean) as string[]))
     })
-  }, [datosTablero])
+  }, [datosDashboard])
 
   return (
     <div className="flex flex-col gap-6">
@@ -185,14 +201,6 @@ export default function DashboardPage() {
             </div>
           </CardContent>
         </Card>
-      ) : impresoras.length === 0 ? (
-        <Card>
-          <CardContent className="flex min-h-48 flex-col items-center justify-center gap-2 text-muted-foreground">
-            <Printer className="h-10 w-10 opacity-30" />
-            <p className="text-sm font-medium">Sin datos del hub</p>
-            <p className="text-xs opacity-70">No se recibieron máquinas desde el servidor.</p>
-          </CardContent>
-        </Card>
       ) : (
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
           <Link href="/maquina/prueba-manual/solicitud" className="block h-full outline-none focus-visible:ring-2 focus-visible:ring-primary rounded-xl">
@@ -230,7 +238,7 @@ export default function DashboardPage() {
             </div>
           </Link>
           {impresoras.map((impresora) => {
-            const row = datosTablero.find(d =>
+            const row = datosDashboard.find(d =>
               d.prensa.replace(/\D/g, "").padStart(2, "0") === impresora.id.replace(/\D/g, "").padStart(2, "0")
             )
             const pc = row?.printCard ?? ""

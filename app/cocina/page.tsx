@@ -311,21 +311,23 @@ export default function CocinaPage() {
               )}
             >
               <CardContent className="p-0">
-                <div className="grid gap-4 p-4 lg:grid-cols-[minmax(260px,1.4fr)_minmax(420px,2fr)_auto] lg:items-center">
+                <div className="grid gap-4 p-4 lg:grid-cols-[minmax(300px,1.4fr)_minmax(420px,2fr)_auto] lg:items-center">
                   <div className="flex min-w-0 items-start gap-3">
-                    <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md bg-background ring-1 ring-border">
-                      <Droplets className="h-5 w-5 text-muted-foreground" />
+                    <div className="flex h-14 w-14 shrink-0 items-center justify-center rounded-md bg-background ring-1 ring-border">
+                      <Droplets className="h-7 w-7 text-primary" />
                     </div>
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-mono text-sm font-bold text-foreground">{sol.id}</p>
                         <StatusBadge estado={sol.estado} />
                       </div>
-                      <p className="mt-1 truncate text-sm font-semibold text-foreground">{sol.color}</p>
-                      <p className="truncate text-xs text-muted-foreground">{sol.serieTinta}</p>
-                      <p className="mt-1 text-xs text-muted-foreground">
-                        {sol.impresoraNombre} - Cuerpo {sol.cuerpoNumero}
+                      <p className="mt-1 truncate font-mono text-3xl font-black leading-none text-foreground">
+                        {sol.color}
                       </p>
+                      <p className="mt-1 truncate text-sm font-semibold text-foreground">
+                        {sol.impresoraNombre}
+                        {sol.cuerpoNumero ? ` - Cuerpo ${sol.cuerpoNumero}` : ""}
+                      </p>
+                      <p className="truncate text-xs text-muted-foreground">{sol.serieTinta}</p>
                     </div>
                   </div>
 
@@ -420,6 +422,7 @@ export default function CocinaPage() {
                           <h3 className="text-sm font-semibold text-foreground">Detalle tecnico</h3>
                         </div>
                         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                          <DetailMetric label="Solicitud" value={sol.id} />
                           <DetailMetric label="BCM" value={formatNumber(sol.aniloxVolumen, 2)} />
                           <DetailMetric label="Anilox" value={sol.aniloxLineatura ? `${sol.aniloxLineatura} LPI` : "--"} />
                           <DetailMetric label="Cobertura" value={`${formatNumber(sol.superficiePorcentaje, 1)}%`} />
